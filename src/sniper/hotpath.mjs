@@ -147,11 +147,18 @@ export async function startHotpath(wallets) {
     const decode = (i, abi, name) => {
       const r = results[i];
       if (!r?.success) return null;
-      return decodeFunctionResult({
-        abi,
-        functionName: name,
-        data: r.returnData,
-      });
+      const data = r.returnData;
+      // RPC race: new curve sometimes returns success + "0x" before state is ready.
+      if (data == null || data === "0x" || data === "0x0") return null;
+      try {
+        return decodeFunctionResult({
+          abi,
+          functionName: name,
+          data,
+        });
+      } catch {
+        return null;
+      }
     };
 
     const info = decode(0, FactoryAbi, "getLaunchedToken");
@@ -210,7 +217,12 @@ export async function startHotpath(wallets) {
     let tx_hash_ts = null;
 
     try {
-      const mc = await multicallLaunch(t, launch.curve);
+      let mc = await multicallLaunch(t, launch.curve);
+      if (!mc) {
+        // Brief retry — new curve code/state can lag the WSS log by a few hundred ms.
+        await new Promise((r) => setTimeout(r, 400));
+        mc = await multicallLaunch(t, launch.curve);
+      }
       if (!mc) {
         log("[snipe] multicall fail", t);
         insertAction({ kind: "skip", token: t, detail: "multicall_fail" });
