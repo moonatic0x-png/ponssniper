@@ -18,6 +18,10 @@ All notable changes to this project are documented here.
 - Unit tests for `quoteSpend`
 - Live probe: ETH→USDG route quotes successfully on Robinhood Chain
 
+### Fixed
+
+- Hotpath no longer silently drops launches waiting for a WSS `DistributorCreated` only — resolves `distributorOf(token)`, logs `skip=no_distributor`, listens for `CreatorFeeRecipientUpdated`, and catch-up-replays recent blocks on boot
+
 ### Changed
 
 - `executeBuy` always runs `coverQuote` before simulate/send (removed `ALLOW_QUOTE_SWAP` gate)

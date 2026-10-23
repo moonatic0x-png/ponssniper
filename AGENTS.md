@@ -11,8 +11,10 @@ Instructions for another agent (or human) to run this repo from a clean clone th
 
 ## What “entering a position” means
 
-1. WSS sees `TokenLaunched` and/or `DistributorCreated`.
+1. WSS sees `TokenLaunched` / `DistributorCreated` / `CreatorFeeRecipientUpdated`.
+   Distributor is resolved from the event **or** on-chain `distributorOf(token)` (not WSS-only).
 2. Gates pass: `buybackEnabled === false` **and** `creatorFeeRecipient === distributor`.
+   Missing distributor → logged `skip` (`no_distributor`), retried when one appears.
 3. Bot sizes **100k whole tokens** (× 10^decimals), computes curve `quoteIn`, simulates, then (if live) sends `curve.buy`.
 4. SQLite gets a `positions` row; dashboard shows it under Positions.
 

@@ -8,6 +8,7 @@ export const FactoryAbi = parseAbi([
 
 export const DistributorFactoryAbi = parseAbi([
   "event DistributorCreated(address indexed token, address distributor)",
+  "function distributorOf(address token) view returns (address)",
 ]);
 
 export const DistributorAbi = parseAbi([

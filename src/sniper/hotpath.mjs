@@ -6,11 +6,20 @@ import {
 import {
   CurveAbi,
   DistributorAbi,
+  DistributorFactoryAbi,
   Erc20Abi,
   FactoryAbi,
   Multicall3Abi,
+  TOPICS,
 } from "../chain/abis.mjs";
-import { KNOWN_QUOTES, LAUNCH, MULTICALL3, ZERO, lower } from "../chain/addresses.mjs";
+import {
+  DIST_FACTORY,
+  KNOWN_QUOTES,
+  LAUNCH,
+  MULTICALL3,
+  ZERO,
+  lower,
+} from "../chain/addresses.mjs";
 import { ethUsdMark } from "../chain/price.mjs";
 import { publicClient } from "../chain/clients.mjs";
 import { config, log } from "../config.mjs";
@@ -31,9 +40,33 @@ export async function startHotpath(wallets) {
   const launches = new Map(); // token -> launch meta
   const distributors = new Map(); // token -> distributor
   const inflight = new Set();
+  /** Tokens we already logged skip=no_distributor (retry when dist appears). */
+  const noDistLogged = new Set();
   const warm = createWarmAccount(wallets);
   await warm.refresh();
   setInterval(() => warm.refresh().catch(() => {}), 12_000);
+
+  /** Prefer WSS map; fall back to on-chain distributorOf (same-tx / missed event). */
+  async function resolveDistributor(token) {
+    const cached = distributors.get(token);
+    if (cached) return cached;
+    try {
+      const onchain = await publicClient().readContract({
+        address: getAddress(DIST_FACTORY),
+        abi: DistributorFactoryAbi,
+        functionName: "distributorOf",
+        args: [getAddress(token)],
+      });
+      if (onchain && lower(onchain) !== ZERO) {
+        const d = lower(onchain);
+        distributors.set(token, d);
+        return d;
+      }
+    } catch {
+      /* */
+    }
+    return null;
+  }
 
   async function multicallLaunch(token, curve) {
     const client = publicClient();
@@ -134,8 +167,24 @@ export async function startHotpath(wallets) {
   async function trySnipe(token) {
     if (inflight.has(token)) return;
     const launch = launches.get(token);
-    const dist = distributors.get(token);
-    if (!launch || !dist) return;
+    if (!launch?.curve) return;
+
+    const dist = await resolveDistributor(token);
+    if (!dist) {
+      if (!noDistLogged.has(token)) {
+        noDistLogged.add(token);
+        log(
+          `[snipe] skip ${token.slice(0, 10)} reason=no_distributor (waiting DistCreated / distributorOf)`,
+        );
+        insertAction({
+          kind: "skip",
+          token,
+          detail: "no_distributor",
+        });
+      }
+      return;
+    }
+    noDistLogged.delete(token);
     inflight.add(token);
 
     const detect_ts = launch.detect_ts || Date.now();
@@ -311,6 +360,39 @@ export async function startHotpath(wallets) {
     }
   }
 
+  async function ensureLaunchMeta(token, seed = {}) {
+    let L = launches.get(token);
+    if (!L) {
+      L = {
+        token,
+        curve: null,
+        pairToken: null,
+        detect_ts: seed.detect_ts ?? Date.now(),
+        blockNumber: seed.blockNumber ?? null,
+        txHash: seed.txHash ?? null,
+      };
+      launches.set(token, L);
+    }
+    if (!L.curve) {
+      try {
+        const info = await publicClient().readContract({
+          address: getAddress(LAUNCH),
+          abi: FactoryAbi,
+          functionName: "getLaunchedToken",
+          args: [getAddress(token)],
+        });
+        if (info?.exists) {
+          L.curve = lower(info.curve);
+          L.pairToken = lower(info.pairToken);
+          launches.set(token, L);
+        }
+      } catch {
+        /* */
+      }
+    }
+    return L;
+  }
+
   const listener = startLogListener({
     async onTokenLaunched(ev) {
       const prev = launches.get(ev.token);
@@ -330,42 +412,65 @@ export async function startHotpath(wallets) {
     },
     async onDistributorCreated(ev) {
       distributors.set(ev.token, ev.distributor);
+      noDistLogged.delete(ev.token);
       log(
         `[detect] DistributorCreated ${ev.token.slice(0, 12)}… dist=${ev.distributor.slice(0, 12)}…`,
       );
-      if (!launches.has(ev.token)) {
-        // distributor may arrive first; store and wait for launch
-        launches.set(ev.token, {
-          token: ev.token,
-          curve: null,
-          pairToken: null,
-          detect_ts: ev.detect_ts,
-          blockNumber: ev.blockNumber,
-          txHash: ev.txHash,
-        });
-      }
-      // If we only have dist, need curve from getLaunchedToken
-      const L = launches.get(ev.token);
-      if (!L.curve) {
-        try {
-          const info = await publicClient().readContract({
-            address: getAddress(LAUNCH),
-            abi: FactoryAbi,
-            functionName: "getLaunchedToken",
-            args: [getAddress(ev.token)],
-          });
-          if (info?.exists) {
-            L.curve = lower(info.curve);
-            L.pairToken = lower(info.pairToken);
-            launches.set(ev.token, L);
-          }
-        } catch {
-          return;
-        }
-      }
+      insertAction({
+        kind: "detect",
+        token: ev.token,
+        detail: "DistributorCreated",
+      });
+      const L = await ensureLaunchMeta(ev.token, ev);
+      if (L.curve) await trySnipe(ev.token);
+    },
+    async onCreatorFeeRecipientUpdated(ev) {
+      log(
+        `[detect] CreatorFeeRecipientUpdated ${ev.token.slice(0, 12)}… → ${ev.newRecipient?.slice(0, 12)}…`,
+      );
+      insertAction({
+        kind: "detect",
+        token: ev.token,
+        detail: "CreatorFeeRecipientUpdated",
+      });
+      const L = await ensureLaunchMeta(ev.token, ev);
       if (L.curve) await trySnipe(ev.token);
     },
   });
+
+  // Boot catch-up: replay recent factory logs so a restart does not miss
+  // eligible launches that already have distributorOf set.
+  try {
+    const client = publicClient();
+    const head = await client.getBlockNumber();
+    const lookback = BigInt(Math.max(0, config.sniperCatchupBlocks));
+    const from = head > lookback ? head - lookback : 0n;
+    if (from <= head) {
+      log(`[hotpath] catch-up blocks ${from}→${head}`);
+      const CHUNK = 2_000n;
+      let cur = from;
+      while (cur <= head) {
+        const to = cur + CHUNK - 1n > head ? head : cur + CHUNK - 1n;
+        const logs = await client.getLogs({
+          address: [getAddress(LAUNCH), getAddress(DIST_FACTORY)],
+          fromBlock: cur,
+          toBlock: to,
+        });
+        // Dist first so distributor map is warm before TokenLaunched handling
+        const distLogs = logs.filter(
+          (l) => l.topics?.[0] === TOPICS.DistributorCreated,
+        );
+        const other = logs.filter(
+          (l) => l.topics?.[0] !== TOPICS.DistributorCreated,
+        );
+        await listener.replayLogs([...distLogs, ...other]);
+        cur = to + 1n;
+      }
+      log(`[hotpath] catch-up done`);
+    }
+  } catch (e) {
+    log("[hotpath] catch-up err", e.message);
+  }
 
   log(
     `[hotpath] ready live=${config.live ? 1 : 0} wallet=${wallets.sniper.address} tokens=${config.sniperTokens}`,

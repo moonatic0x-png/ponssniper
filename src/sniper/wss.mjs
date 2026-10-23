@@ -9,10 +9,14 @@ import { publicClient, wssClient } from "../chain/clients.mjs";
 import { log } from "../config.mjs";
 
 /**
- * Subscribe to TokenLaunched + DistributorCreated via WSS.
+ * Subscribe to TokenLaunched + DistributorCreated + CreatorFeeRecipientUpdated.
  * Falls back to HTTP getLogs polling on disconnect.
  */
-export function startLogListener({ onTokenLaunched, onDistributorCreated }) {
+export function startLogListener({
+  onTokenLaunched,
+  onDistributorCreated,
+  onCreatorFeeRecipientUpdated,
+}) {
   let stopped = false;
   let unwatch = null;
   let pollTimer = null;
@@ -57,6 +61,24 @@ export function startLogListener({ onTokenLaunched, onDistributorCreated }) {
             txHash: lg.transactionHash,
             detect_ts: Date.now(),
           });
+        } else if (
+          topic === TOPICS.CreatorFeeRecipientUpdated &&
+          addr === LAUNCH &&
+          onCreatorFeeRecipientUpdated
+        ) {
+          const { args } = decodeEventLog({
+            abi: FactoryAbi,
+            data: lg.data,
+            topics: lg.topics,
+          });
+          await onCreatorFeeRecipientUpdated({
+            token: lower(args.token),
+            oldRecipient: lower(args.oldRecipient),
+            newRecipient: lower(args.newRecipient),
+            blockNumber: lg.blockNumber != null ? Number(lg.blockNumber) : null,
+            txHash: lg.transactionHash,
+            detect_ts: Date.now(),
+          });
         }
       } catch (e) {
         log("[wss] decode err", e.message);
@@ -69,20 +91,6 @@ export function startLogListener({ onTokenLaunched, onDistributorCreated }) {
     log("[wss] subscribing logs on factory + dist factory");
     unwatch = client.watchEvent({
       address: [getAddress(LAUNCH), getAddress(DIST_FACTORY)],
-      events: [
-        {
-          type: "event",
-          name: "TokenLaunched",
-          inputs: FactoryAbi.find((x) => x.name === "TokenLaunched").inputs,
-        },
-        {
-          type: "event",
-          name: "DistributorCreated",
-          inputs: DistributorFactoryAbi.find(
-            (x) => x.name === "DistributorCreated",
-          ).inputs,
-        },
-      ],
       onLogs: (logs) => {
         mode = "wss";
         handleLogs(logs);
@@ -152,5 +160,9 @@ export function startLogListener({ onTokenLaunched, onDistributorCreated }) {
       if (pollTimer) clearInterval(pollTimer);
     },
     mode: () => mode,
+    /** Replay historical factory logs (used for boot catch-up). */
+    async replayLogs(logs) {
+      await handleLogs(logs);
+    },
   };
 }
