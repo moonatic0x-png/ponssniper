@@ -191,6 +191,20 @@ export function getCursor(name) {
   return r?.value ?? null;
 }
 
+export function hasPosition(token) {
+  const r = db()
+    .prepare(`SELECT 1 AS ok FROM positions WHERE token=?`)
+    .get(token);
+  return !!r;
+}
+
+export function knownPositionTokens() {
+  return db()
+    .prepare(`SELECT token FROM positions`)
+    .all()
+    .map((r) => r.token);
+}
+
 export function sumDailyQuoteSpend(sinceMs) {
   const rows = db()
     .prepare(

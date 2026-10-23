@@ -24,7 +24,9 @@ import { ethUsdMark } from "../chain/price.mjs";
 import { publicClient } from "../chain/clients.mjs";
 import { config, log } from "../config.mjs";
 import {
+  hasPosition,
   insertAction,
+  knownPositionTokens,
   sumDailyQuoteSpend,
   upsertPool,
   upsertPosition,
@@ -40,32 +42,35 @@ export async function startHotpath(wallets) {
   const launches = new Map(); // token -> launch meta
   const distributors = new Map(); // token -> distributor
   const inflight = new Set();
+  /** Successful buy_dry / buy_sent — never buy again from any event. */
+  const bought = new Set(knownPositionTokens().map(lower));
   /** Tokens we already logged skip=no_distributor (retry when dist appears). */
   const noDistLogged = new Set();
   const warm = createWarmAccount(wallets);
   await warm.refresh();
   setInterval(() => warm.refresh().catch(() => {}), 12_000);
 
-  /** Prefer WSS map; fall back to on-chain distributorOf (same-tx / missed event). */
-  async function resolveDistributor(token) {
-    const cached = distributors.get(token);
-    if (cached) return cached;
-    try {
-      const onchain = await publicClient().readContract({
-        address: getAddress(DIST_FACTORY),
-        abi: DistributorFactoryAbi,
-        functionName: "distributorOf",
-        args: [getAddress(token)],
-      });
-      if (onchain && lower(onchain) !== ZERO) {
-        const d = lower(onchain);
-        distributors.set(token, d);
-        return d;
-      }
-    } catch {
-      /* */
+  let headCache = { n: 0n, at: 0 };
+  async function currentHead() {
+    const now = Date.now();
+    if (headCache.n > 0n && now - headCache.at < 2_000) return headCache.n;
+    headCache = { n: await publicClient().getBlockNumber(), at: now };
+    return headCache.n;
+  }
+
+  /** Drop launches older than SNIPER_CATCHUP_BLOCKS (~90s default). */
+  async function isStaleLaunch(launch) {
+    const maxAge = BigInt(Math.max(0, config.sniperCatchupBlocks));
+    if (maxAge === 0n) return false;
+    if (launch.blockNumber != null) {
+      const head = await currentHead();
+      return head > BigInt(launch.blockNumber) &&
+        head - BigInt(launch.blockNumber) > maxAge;
     }
-    return null;
+    const detect = launch.detect_ts || 0;
+    if (!detect) return false;
+    // ~0.1s/block → ms ≈ blocks * 100
+    return Date.now() - detect > Number(maxAge) * 100;
   }
 
   async function multicallLaunch(token, curve) {
@@ -122,6 +127,15 @@ export async function startHotpath(wallets) {
           functionName: "symbol",
         }),
       },
+      {
+        target: getAddress(DIST_FACTORY),
+        allowFailure: true,
+        callData: encodeFunctionData({
+          abi: DistributorFactoryAbi,
+          functionName: "distributorOf",
+          args: [tokenA],
+        }),
+      },
     ];
     const results = await client.readContract({
       address: getAddress(MULTICALL3),
@@ -146,11 +160,16 @@ export async function startHotpath(wallets) {
     const taxBps = decode(3, CurveAbi, "creatorTaxBps");
     const decimals = decode(4, Erc20Abi, "decimals");
     const symbol = decode(5, Erc20Abi, "symbol");
+    const distributorOf = decode(6, DistributorFactoryAbi, "distributorOf");
 
     if (!info || !reserves) return null;
 
     const Q = reserves[0];
     const T = reserves[1];
+    let dist = null;
+    if (distributorOf && lower(distributorOf) !== ZERO) {
+      dist = lower(distributorOf);
+    }
     return {
       info,
       curveState: {
@@ -161,43 +180,62 @@ export async function startHotpath(wallets) {
       },
       decimals: Number(decimals ?? 18),
       symbol: symbol || null,
+      distributorOf: dist,
     };
   }
 
   async function trySnipe(token) {
-    if (inflight.has(token)) return;
-    const launch = launches.get(token);
-    if (!launch?.curve) return;
-
-    const dist = await resolveDistributor(token);
-    if (!dist) {
-      if (!noDistLogged.has(token)) {
-        noDistLogged.add(token);
-        log(
-          `[snipe] skip ${token.slice(0, 10)} reason=no_distributor (waiting DistCreated / distributorOf)`,
-        );
-        insertAction({
-          kind: "skip",
-          token,
-          detail: "no_distributor",
-        });
-      }
+    const t = lower(token);
+    if (bought.has(t) || hasPosition(t)) {
+      bought.add(t);
       return;
     }
-    noDistLogged.delete(token);
-    inflight.add(token);
+    if (inflight.has(t)) return;
+    const launch = launches.get(t);
+    if (!launch?.curve) return;
+
+    if (await isStaleLaunch(launch)) {
+      insertAction({
+        kind: "skip",
+        token: t,
+        detail: "stale_launch",
+      });
+      return;
+    }
+
+    inflight.add(t);
 
     const detect_ts = launch.detect_ts || Date.now();
     let gate_ts = null;
     let tx_hash_ts = null;
 
     try {
-      const mc = await multicallLaunch(token, launch.curve);
+      const mc = await multicallLaunch(t, launch.curve);
       if (!mc) {
-        log("[snipe] multicall fail", token);
-        insertAction({ kind: "skip", token, detail: "multicall_fail" });
+        log("[snipe] multicall fail", t);
+        insertAction({ kind: "skip", token: t, detail: "multicall_fail" });
         return;
       }
+
+      // WSS map first; else batched distributorOf from the same multicall.
+      let dist = distributors.get(t) || mc.distributorOf;
+      if (dist) distributors.set(t, dist);
+
+      if (!dist) {
+        if (!noDistLogged.has(t)) {
+          noDistLogged.add(t);
+          log(
+            `[snipe] skip ${t.slice(0, 10)} reason=no_distributor (waiting DistCreated)`,
+          );
+          insertAction({
+            kind: "skip",
+            token: t,
+            detail: "no_distributor",
+          });
+        }
+        return;
+      }
+      noDistLogged.delete(t);
 
       const { info, curveState, decimals, symbol } = mc;
       const pair = lower(info.pairToken) || launch.pairToken;
@@ -211,10 +249,9 @@ export async function startHotpath(wallets) {
       });
       gate_ts = Date.now();
 
-      // Async journal pool (never blocks send ordering after gate)
       queueMicrotask(() => {
         upsertPool({
-          token,
+          token: t,
           curve: launch.curve,
           distributor: dist,
           pair,
@@ -229,11 +266,11 @@ export async function startHotpath(wallets) {
 
       if (!gate.ok) {
         log(
-          `[snipe] skip ${symbol || token.slice(0, 10)} reason=${gate.reason} detect→gate=${gate_ts - detect_ts}ms`,
+          `[snipe] skip ${symbol || t.slice(0, 10)} reason=${gate.reason} detect→gate=${gate_ts - detect_ts}ms`,
         );
         insertAction({
           kind: "skip",
-          token,
+          token: t,
           detail: gate.reason,
           latency_ms: gate_ts - detect_ts,
         });
@@ -247,7 +284,7 @@ export async function startHotpath(wallets) {
       });
       if (!plan.ok) {
         log(`[snipe] plan fail ${plan.reason}`);
-        insertAction({ kind: "skip", token, detail: plan.reason });
+        insertAction({ kind: "skip", token: t, detail: plan.reason });
         return;
       }
 
@@ -256,15 +293,21 @@ export async function startHotpath(wallets) {
         start.setUTCHours(0, 0, 0, 0);
         const spent = sumDailyQuoteSpend(start.getTime());
         if (spent + plan.quoteIn > config.dailyMaxQuote) {
-          insertAction({ kind: "skip", token, detail: "daily_max_quote" });
+          insertAction({ kind: "skip", token: t, detail: "daily_max_quote" });
           log("[snipe] daily max quote");
           return;
         }
       }
 
+      // Re-check before send — another event may have finished a buy.
+      if (bought.has(t) || hasPosition(t)) {
+        bought.add(t);
+        return;
+      }
+
       insertAction({
         kind: "detect",
-        token,
+        token: t,
         detail: `gate_ok ${symbol || ""}`,
         latency_ms: gate_ts - detect_ts,
       });
@@ -280,7 +323,7 @@ export async function startHotpath(wallets) {
 
       const coverVia = result.cover?.via ?? "?";
       log(
-        `[snipe] ${config.live ? "LIVE" : "DRY"} ${symbol || token.slice(0, 10)} ` +
+        `[snipe] ${config.live ? "LIVE" : "DRY"} ${symbol || t.slice(0, 10)} ` +
           `detect→gate=${gate_ts - detect_ts}ms gate→tx=${tx_hash_ts - gate_ts}ms ` +
           `detect→tx=${tx_hash_ts - detect_ts}ms ` +
           `quoteIn=${plan.quoteIn} tokens=${plan.target} cover=${coverVia} ` +
@@ -297,7 +340,7 @@ export async function startHotpath(wallets) {
             ? "buy_dry"
             : "buy_sent"
           : "buy_fail",
-        token,
+        token: t,
         detail: result.ok
           ? `${result.tx || `quote=${plan.quoteIn}`} cover=${coverVia}` +
             (result.cover?.ethIn != null ? ` ethIn=${result.cover.ethIn}` : "")
@@ -306,7 +349,7 @@ export async function startHotpath(wallets) {
       });
 
       if (result.ok) {
-        // entry epoch async
+        bought.add(t);
         let entryEpoch = 0;
         try {
           entryEpoch = Number(
@@ -330,7 +373,7 @@ export async function startHotpath(wallets) {
         }
 
         upsertPosition({
-          token,
+          token: t,
           entry_block: launch.blockNumber,
           entry_epoch: entryEpoch,
           tokens: plan.target,
@@ -340,7 +383,7 @@ export async function startHotpath(wallets) {
           status: result.dry ? "dry" : "open",
         });
         upsertPool({
-          token,
+          token: t,
           curve: launch.curve,
           distributor: dist,
           pair,
@@ -354,24 +397,27 @@ export async function startHotpath(wallets) {
       }
     } catch (e) {
       log("[snipe] err", e.message);
-      insertAction({ kind: "buy_fail", token, detail: e.message });
+      insertAction({ kind: "buy_fail", token: t, detail: e.message });
     } finally {
-      inflight.delete(token);
+      inflight.delete(t);
     }
   }
 
   async function ensureLaunchMeta(token, seed = {}) {
-    let L = launches.get(token);
+    const t = lower(token);
+    let L = launches.get(t);
     if (!L) {
       L = {
-        token,
+        token: t,
         curve: null,
         pairToken: null,
         detect_ts: seed.detect_ts ?? Date.now(),
         blockNumber: seed.blockNumber ?? null,
         txHash: seed.txHash ?? null,
       };
-      launches.set(token, L);
+      launches.set(t, L);
+    } else if (seed.blockNumber != null && L.blockNumber == null) {
+      L.blockNumber = seed.blockNumber;
     }
     if (!L.curve) {
       try {
@@ -379,12 +425,12 @@ export async function startHotpath(wallets) {
           address: getAddress(LAUNCH),
           abi: FactoryAbi,
           functionName: "getLaunchedToken",
-          args: [getAddress(token)],
+          args: [getAddress(t)],
         });
         if (info?.exists) {
           L.curve = lower(info.curve);
           L.pairToken = lower(info.pairToken);
-          launches.set(token, L);
+          launches.set(t, L);
         }
       } catch {
         /* */
@@ -395,58 +441,62 @@ export async function startHotpath(wallets) {
 
   const listener = startLogListener({
     async onTokenLaunched(ev) {
-      const prev = launches.get(ev.token);
-      launches.set(ev.token, {
+      const t = lower(ev.token);
+      const prev = launches.get(t);
+      launches.set(t, {
         ...ev,
+        token: t,
         detect_ts: prev?.detect_ts ?? ev.detect_ts,
       });
       log(
-        `[detect] TokenLaunched ${ev.token.slice(0, 12)}… curve=${ev.curve.slice(0, 12)}…`,
+        `[detect] TokenLaunched ${t.slice(0, 12)}… curve=${ev.curve.slice(0, 12)}…`,
       );
       insertAction({
         kind: "detect",
-        token: ev.token,
+        token: t,
         detail: "TokenLaunched",
       });
-      await trySnipe(ev.token);
+      await trySnipe(t);
     },
     async onDistributorCreated(ev) {
-      distributors.set(ev.token, ev.distributor);
-      noDistLogged.delete(ev.token);
+      const t = lower(ev.token);
+      distributors.set(t, lower(ev.distributor));
+      noDistLogged.delete(t);
       log(
-        `[detect] DistributorCreated ${ev.token.slice(0, 12)}… dist=${ev.distributor.slice(0, 12)}…`,
+        `[detect] DistributorCreated ${t.slice(0, 12)}… dist=${ev.distributor.slice(0, 12)}…`,
       );
       insertAction({
         kind: "detect",
-        token: ev.token,
+        token: t,
         detail: "DistributorCreated",
       });
-      const L = await ensureLaunchMeta(ev.token, ev);
-      if (L.curve) await trySnipe(ev.token);
+      const L = await ensureLaunchMeta(t, ev);
+      if (L.curve) await trySnipe(t);
     },
     async onCreatorFeeRecipientUpdated(ev) {
+      const t = lower(ev.token);
       log(
-        `[detect] CreatorFeeRecipientUpdated ${ev.token.slice(0, 12)}… → ${ev.newRecipient?.slice(0, 12)}…`,
+        `[detect] CreatorFeeRecipientUpdated ${t.slice(0, 12)}… → ${ev.newRecipient?.slice(0, 12)}…`,
       );
       insertAction({
         kind: "detect",
-        token: ev.token,
+        token: t,
         detail: "CreatorFeeRecipientUpdated",
       });
-      const L = await ensureLaunchMeta(ev.token, ev);
-      if (L.curve) await trySnipe(ev.token);
+      const L = await ensureLaunchMeta(t, ev);
+      if (L.curve) await trySnipe(t);
     },
   });
 
-  // Boot catch-up: replay recent factory logs so a restart does not miss
-  // eligible launches that already have distributorOf set.
+  // Boot catch-up: only last ~90s of factory logs (same bound as max snipe age).
   try {
     const client = publicClient();
     const head = await client.getBlockNumber();
+    headCache = { n: head, at: Date.now() };
     const lookback = BigInt(Math.max(0, config.sniperCatchupBlocks));
     const from = head > lookback ? head - lookback : 0n;
-    if (from <= head) {
-      log(`[hotpath] catch-up blocks ${from}→${head}`);
+    if (from <= head && lookback > 0n) {
+      log(`[hotpath] catch-up blocks ${from}→${head} (maxAge=${lookback})`);
       const CHUNK = 2_000n;
       let cur = from;
       while (cur <= head) {
@@ -456,7 +506,6 @@ export async function startHotpath(wallets) {
           fromBlock: cur,
           toBlock: to,
         });
-        // Dist first so distributor map is warm before TokenLaunched handling
         const distLogs = logs.filter(
           (l) => l.topics?.[0] === TOPICS.DistributorCreated,
         );
@@ -473,8 +522,8 @@ export async function startHotpath(wallets) {
   }
 
   log(
-    `[hotpath] ready live=${config.live ? 1 : 0} wallet=${wallets.sniper.address} tokens=${config.sniperTokens}`,
+    `[hotpath] ready live=${config.live ? 1 : 0} wallet=${wallets.sniper.address} tokens=${config.sniperTokens} catchup=${config.sniperCatchupBlocks} delayMs=${config.sniperDelayMs}`,
   );
 
-  return { stop: () => listener.stop(), warm, launches, distributors };
+  return { stop: () => listener.stop(), warm, launches, distributors, bought };
 }

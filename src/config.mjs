@@ -69,8 +69,11 @@ export const config = {
   readAddress,
   /** How far back to scan launches/buys on observe start (~0.1s blocks). */
   readLookbackBlocks: num("READ_LOOKBACK_BLOCKS", 1_000_000),
-  /** Hotpath catch-up on boot (blocks ≈ 0.1s). Default 15k ≈ 25 min. */
-  sniperCatchupBlocks: num("SNIPER_CATCHUP_BLOCKS", 15_000),
+  /**
+   * Boot catch-up + max launch age for a snipe (blocks ≈ 0.1s).
+   * Default 900 ≈ 90s — older pools are not snipes.
+   */
+  sniperCatchupBlocks: num("SNIPER_CATCHUP_BLOCKS", 900),
   rpcHttp: process.env.RPC_HTTP || "https://rpc.mainnet.chain.robinhood.com",
   rpcWss: process.env.RPC_WSS || "wss://robinhood.drpc.org",
   rpcHttpFallback:

@@ -21,6 +21,7 @@ All notable changes to this project are documented here.
 ### Fixed
 
 - Hotpath no longer silently drops launches waiting for a WSS `DistributorCreated` only — resolves `distributorOf(token)`, logs `skip=no_distributor`, listens for `CreatorFeeRecipientUpdated`, and catch-up-replays recent blocks on boot
+- Bound snipe age / catch-up to ~90s (`SNIPER_CATCHUP_BLOCKS=900`); batch `distributorOf` into the launch multicall; durable `bought` + DB position guard against double buys from launch/dist/recipient events
 
 ### Changed
 

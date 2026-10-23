@@ -89,7 +89,8 @@ MAX_QUOTE_IN=<raw quote units>     # e.g. USDG 6dp: 50000000 = 50 USDG
 DAILY_MAX_QUOTE=<raw units/day>
 SLIPPAGE_BPS=300
 SNIPER_TOKENS=100000
-SNIPER_DELAY_MS=0                  # raise (e.g. 2500) to wait out ~99%→decay snipe tax (~3s)
+SNIPER_DELAY_MS=0                  # raise (e.g. 2500) if buys land ~1s late (still in ~3s snipe-tax window)
+SNIPER_CATCHUP_BLOCKS=900          # boot replay + max launch age (~90s); older → stale_launch
 GAS_RESERVE_WEI=100000000000000    # floor; preflight also sizes gas via fee×units
 SNIPER_LIVE=0                      # keep 0 until operator says go
 ```
