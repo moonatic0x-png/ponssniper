@@ -25,7 +25,7 @@ Curves use `buy(quoteIn, minTokensOut, to)` (exact-in). We size a fixed token am
 
 **Quote funding:** wallet is ETH-primary. Before each buy, `coverQuote` uses existing pair balance or swaps only the shortfall ETH→`pairToken` through the router (native ETH pairs skip the swap).
 
-**Snipe tax:** on-chain tax starts ~99% (`snipeTaxStartBps`) and decays over ~3s. Default `SNIPER_DELAY_MS=0` for max speed; raise if you want to wait out the tax.
+**Snipe tax:** on-chain tax starts ~99% (`snipeTaxStartBps`) and decays over ~3s. Default `SNIPER_DELAY_MS=3000` waits that window out so buys avoid snipe tax; set `0` only if you want max speed and accept the tax.
 
 ## Holder count (dashboard)
 

@@ -82,7 +82,11 @@ export const config = {
   maxQuoteIn: big("MAX_QUOTE_IN"),
   dailyMaxQuote: big("DAILY_MAX_QUOTE"),
   slippageBps: num("SLIPPAGE_BPS", 300),
-  sniperDelayMs: num("SNIPER_DELAY_MS", 0),
+  /**
+   * Wait after sizing before send. Snipe tax starts ~99% and decays over ~3s;
+   * default 3000 waits the window out (no snipe tax). Set 0 for max speed / accept tax.
+   */
+  sniperDelayMs: num("SNIPER_DELAY_MS", 3000),
   skipIneligibleQuotes: bool("SKIP_INELIGIBLE_QUOTES", true),
   /**
    * Floor for ETH left for gas after cover (wei). Actual reserve is
