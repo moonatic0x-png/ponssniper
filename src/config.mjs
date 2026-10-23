@@ -65,6 +65,76 @@ const addrList = (k) => {
       return getAddress(a);
     });
 };
+/** Comma/space/semicolon URL list; drops empties; preserves order; dedupes. */
+const urlList = (k) => {
+  const v = process.env[k];
+  if (v == null || v === "") return [];
+  const out = [];
+  const seen = new Set();
+  for (const raw of v.split(/[,;\s]+/)) {
+    const u = raw.trim();
+    if (!u) continue;
+    const key = u.replace(/\/$/, "").toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(u.replace(/\/$/, ""));
+  }
+  return out;
+};
+
+/** Built-in public HTTP RPCs (no API key). Official first for eth_sendRawTransaction. */
+const DEFAULT_RPC_HTTP = [
+  "https://rpc.mainnet.chain.robinhood.com",
+  "https://robinhood.drpc.org",
+  "https://robinhood-rpc.publicnode.com",
+  "https://rpc-robinhood.blockmachine.io",
+  "https://robinhood.rpc.blxrbdn.com",
+  "https://rpc.ordofi.network",
+  "https://robinhood.daybreak-rpc.network",
+  "https://api.blockvectra.com/v1/robinhood_mainnet/public",
+];
+
+const DEFAULT_RPC_WSS = [
+  "wss://robinhood.drpc.org",
+  "wss://robinhood-rpc.publicnode.com",
+];
+
+function resolveRpcHttpUrls() {
+  const fromList = urlList("RPC_HTTP_URLS");
+  if (fromList.length) return fromList;
+  // Backward-compat: RPC_HTTP + RPC_HTTP_FALLBACK (+ any extras in RPC_HTTP_EXTRA)
+  const primary =
+    process.env.RPC_HTTP || "https://rpc.mainnet.chain.robinhood.com";
+  const fb = process.env.RPC_HTTP_FALLBACK || "https://robinhood.drpc.org";
+  const extra = urlList("RPC_HTTP_EXTRA");
+  const merged = [primary, fb, ...extra, ...DEFAULT_RPC_HTTP];
+  const out = [];
+  const seen = new Set();
+  for (const u of merged) {
+    const key = u.replace(/\/$/, "").toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(u.replace(/\/$/, ""));
+  }
+  return out;
+}
+
+function resolveRpcWssUrls() {
+  const fromList = urlList("RPC_WSS_URLS");
+  if (fromList.length) return fromList;
+  const primary = process.env.RPC_WSS || "wss://robinhood.drpc.org";
+  const extra = urlList("RPC_WSS_EXTRA");
+  const merged = [primary, ...extra, ...DEFAULT_RPC_WSS];
+  const out = [];
+  const seen = new Set();
+  for (const u of merged) {
+    const key = u.replace(/\/$/, "").toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(u.replace(/\/$/, ""));
+  }
+  return out;
+}
 
 export const ROOT_DIR = ROOT;
 export const CHAIN_ID = 4663;
@@ -75,6 +145,8 @@ export const BLOCK_TIME_S = 0.1008;
  * Safe in a shared .env: does NOT disable sniper when secrets/wallets.json exists.
  */
 const readAddress = addr("READ_ADDRESS");
+const rpcHttpUrls = resolveRpcHttpUrls();
+const rpcWssUrls = resolveRpcWssUrls();
 
 export const config = {
   live: bool("SNIPER_LIVE", false),
@@ -82,12 +154,32 @@ export const config = {
   /** How far back to scan launches/buys on observe start (~0.1s blocks). */
   readLookbackBlocks: num("READ_LOOKBACK_BLOCKS", 1_000_000),
   /**
+   * Rolling window of TokenLaunched to re-check each observe tick.
+   * Must be wide enough to cover “buy shortly after launch”; default ~3h.
+   * (Cursor-only ~50-block ticks miss buys on pools launched earlier.)
+   */
+  observeRecheckBlocks: num("OBSERVE_RECHECK_BLOCKS", 100_000),
+  /**
+   * Optional Blockscout REST base for observe token discovery (held ERC-20s).
+   * Finds follow bags whose launches fall outside READ_LOOKBACK_BLOCKS.
+   * Cloudflare may block keyless calls — set BLOCKSCOUT_API_KEY if needed.
+   */
+  blockscoutApi:
+    process.env.BLOCKSCOUT_API || "https://robinhoodchain.blockscout.com",
+  blockscoutApiKey: process.env.BLOCKSCOUT_API_KEY || "",
+  /**
    * Boot catch-up + max launch age for a snipe (blocks ≈ 0.1s).
    * Default 900 ≈ 90s — older pools are not snipes.
    */
   sniperCatchupBlocks: num("SNIPER_CATCHUP_BLOCKS", 900),
-  rpcHttp: process.env.RPC_HTTP || "https://rpc.mainnet.chain.robinhood.com",
-  rpcWss: process.env.RPC_WSS || "wss://robinhood.drpc.org",
+  /** Ordered HTTP RPC pool (failover / rank). Prefer RPC_HTTP_URLS. */
+  rpcHttpUrls,
+  /** Ordered WSS pool for log subscriptions. Prefer RPC_WSS_URLS. */
+  rpcWssUrls,
+  /** Primary HTTP (first in pool) — kept for scripts / logs. */
+  rpcHttp: rpcHttpUrls[0] || "https://rpc.mainnet.chain.robinhood.com",
+  rpcWss: rpcWssUrls[0] || "wss://robinhood.drpc.org",
+  /** @deprecated use rpcHttpUrls — still accepted via RPC_HTTP_FALLBACK merge */
   rpcHttpFallback:
     process.env.RPC_HTTP_FALLBACK || "https://robinhood.drpc.org",
   sniperTokens: BigInt(process.env.SNIPER_TOKENS || "100000"),
@@ -112,6 +204,12 @@ export const config = {
   walletsPath: resolve(ROOT, "secrets/wallets.json"),
   dashHost: process.env.DASH_HOST || "127.0.0.1",
   dashPort: num("DASH_PORT", 42100),
+  /** Pons launchpad token page base (append /0x…). */
+  ponsAppBase:
+    process.env.PONS_APP_BASE || "https://ponsfamily.com/launchpad",
+  /** Block explorer base for token/tx links. */
+  explorerBase:
+    process.env.EXPLORER_BASE || "https://robinhoodchain.blockscout.com",
 
   // --- Farmer-follow (piggyback) — independent of SNIPER_LIVE -----------------
   /** 0 = DRY (default). Live curve buys only when FOLLOW_LIVE=1. */

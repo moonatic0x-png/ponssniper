@@ -3,6 +3,7 @@ import { readFileSync, mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { config } from "../config.mjs";
+import { KNOWN_QUOTES, ZERO, lower } from "../chain/addresses.mjs";
 
 const SCHEMA = readFileSync(
   resolve(dirname(fileURLToPath(import.meta.url)), "schema.sql"),
@@ -260,6 +261,7 @@ export function getState() {
   const positions = db()
     .prepare(
       `SELECT p.*, pl.symbol, pl.curve, pl.distributor, pl.pair, pl.decimals,
+              pl.launch_tx, pl.launch_block, pl.buyback, pl.tax_bps,
               s.epoch_count AS current_epoch, s.unallocated_quote, s.holder_count,
               s.pot_usd, s.phase, s.bag_mark_quote, s.bag_mark_usd, s.refreshed_at
        FROM positions p
@@ -272,7 +274,8 @@ export function getState() {
   const claimsByToken = {};
   for (const c of db()
     .prepare(
-      `SELECT token, SUM(CAST(quote_amount AS REAL)) AS q, SUM(COALESCE(usd,0)) AS usd, COUNT(*) AS n
+      `SELECT token, SUM(CAST(quote_amount AS REAL)) AS q, SUM(COALESCE(usd,0)) AS usd,
+              COUNT(*) AS n, MAX(tx) AS last_tx, MAX(created_at) AS last_at
        FROM claims GROUP BY token`,
     )
     .all()) {
@@ -297,6 +300,9 @@ export function getState() {
       .prepare(`SELECT COALESCE(SUM(usd),0) AS u FROM claims`)
       .get()?.u ?? 0;
 
+  const ponsBase = String(config.ponsAppBase || "").replace(/\/$/, "");
+  const explorBase = String(config.explorerBase || "").replace(/\/$/, "");
+
   return {
     positions: positions.map((p) => {
       const cl = claimsByToken[p.token];
@@ -305,18 +311,34 @@ export function getState() {
           p.entry_epoch != null &&
           Number(p.current_epoch) > Number(p.entry_epoch)) ||
         Number(p.current_epoch || 0) > 0;
+      const pairMeta = KNOWN_QUOTES[lower(p.pair) || ZERO];
       return {
         ...p,
+        pair_symbol: pairMeta?.symbol || (p.pair ? null : "ETH"),
         published: !!published,
         payout: !!(cl && cl.n > 0),
         claim_count: cl?.n ?? 0,
         claim_quote: cl?.q ?? 0,
         claim_usd: cl?.usd ?? 0,
+        claim_tx: cl?.last_tx ?? null,
+        claim_at: cl?.last_at ?? null,
+        pons_url: ponsBase ? `${ponsBase}/${p.token}` : null,
+        explorer_token_url: explorBase
+          ? `${explorBase}/token/${p.token}`
+          : null,
+        explorer_buy_url:
+          explorBase && p.buy_tx ? `${explorBase}/tx/${p.buy_tx}` : null,
+        explorer_claim_url:
+          explorBase && cl?.last_tx ? `${explorBase}/tx/${cl.last_tx}` : null,
       };
     }),
     actions,
     snapshot: snap ?? null,
     claims_total_usd: claimsTotalUsd,
+    links: {
+      pons_app_base: ponsBase || null,
+      explorer_base: explorBase || null,
+    },
     held_pools: positions.map((p) => ({
       token: p.token,
       symbol: p.symbol,
@@ -325,6 +347,10 @@ export function getState() {
       phase: p.phase,
       unallocated_quote: p.unallocated_quote,
       refreshed_at: p.refreshed_at,
+      pons_url: ponsBase ? `${ponsBase}/${p.token}` : null,
+      explorer_token_url: explorBase
+        ? `${explorBase}/token/${p.token}`
+        : null,
     })),
   };
 }

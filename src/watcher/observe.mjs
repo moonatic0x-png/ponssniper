@@ -41,6 +41,44 @@ function costUsdFor(pair, quoteIn, ethPx) {
   return null;
 }
 
+/**
+ * List ERC-20s the wallet holds via Blockscout (when reachable).
+ * @returns {Promise<string[]>} lowercase token addresses with bal > 0
+ */
+async function fetchHeldTokenAddresses(wallet) {
+  const base = String(config.blockscoutApi || "").replace(/\/$/, "");
+  if (!base) return [];
+  const url = `${base}/api/v2/addresses/${getAddress(wallet)}/tokens?type=ERC-20`;
+  const headers = { Accept: "application/json" };
+  if (config.blockscoutApiKey) {
+    headers.Authorization = config.blockscoutApiKey.startsWith("Bearer ")
+      ? config.blockscoutApiKey
+      : `Bearer ${config.blockscoutApiKey}`;
+  }
+  const res = await fetch(url, {
+    headers,
+    signal: AbortSignal.timeout(20_000),
+  });
+  if (!res.ok) {
+    log(`[observe] explorer tokens HTTP ${res.status}`);
+    return [];
+  }
+  const body = await res.json();
+  const items = body?.items || body?.result || [];
+  const out = [];
+  for (const it of items) {
+    const addr = it?.token?.address_hash || it?.token?.address || it?.contractAddress;
+    const raw = it?.value ?? it?.balance ?? "0";
+    try {
+      if (addr && BigInt(raw) > 0n) out.push(lower(addr));
+    } catch {
+      /* */
+    }
+  }
+  if (out.length) log(`[observe] explorer held tokens=${out.length}`);
+  return out;
+}
+
 async function fetchMeta(token, curveHint) {
   const client = publicClient();
   const tokenA = getAddress(token);
@@ -97,48 +135,59 @@ async function buysOnCurve(curve, wallet, fromBlock, toBlock) {
   const client = publicClient();
   const curveA = getAddress(curve);
   const me = getAddress(wallet);
-  const [asBuyer, asRecipient] = await Promise.all([
-    client.getLogs({
-      address: curveA,
-      event: curveBuyEvent,
-      args: { buyer: me },
-      fromBlock,
-      toBlock,
-    }),
-    client.getLogs({
-      address: curveA,
-      event: curveBuyEvent,
-      args: { recipient: me },
-      fromBlock,
-      toBlock,
-    }),
-  ]);
   const seen = new Set();
   let quoteIn = 0n;
   let tokens = 0n;
   let buyTx = null;
   let entryBlock = null;
-  for (const lg of [...asBuyer, ...asRecipient]) {
-    const key = `${lg.transactionHash}:${lg.logIndex}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    let decoded;
-    try {
-      decoded = decodeEventLog({
-        abi: CurveAbi,
-        data: lg.data,
-        topics: lg.topics,
-      });
-    } catch {
-      continue;
+
+  let from = BigInt(fromBlock);
+  const end = BigInt(toBlock);
+  while (from <= end) {
+    const to = from + CHUNK - 1n > end ? end : from + CHUNK - 1n;
+    const [asBuyer, asRecipient] = await Promise.all([
+      client
+        .getLogs({
+          address: curveA,
+          event: curveBuyEvent,
+          args: { buyer: me },
+          fromBlock: from,
+          toBlock: to,
+        })
+        .catch(() => []),
+      client
+        .getLogs({
+          address: curveA,
+          event: curveBuyEvent,
+          args: { recipient: me },
+          fromBlock: from,
+          toBlock: to,
+        })
+        .catch(() => []),
+    ]);
+    for (const lg of [...asBuyer, ...asRecipient]) {
+      const key = `${lg.transactionHash}:${lg.logIndex}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      let decoded;
+      try {
+        decoded = decodeEventLog({
+          abi: CurveAbi,
+          data: lg.data,
+          topics: lg.topics,
+        });
+      } catch {
+        continue;
+      }
+      quoteIn += decoded.args.quoteIn;
+      tokens += decoded.args.tokensOut;
+      if (!buyTx) {
+        buyTx = lg.transactionHash;
+        entryBlock =
+          lg.blockNumber != null ? Number(lg.blockNumber) : null;
+      }
     }
-    quoteIn += decoded.args.quoteIn;
-    tokens += decoded.args.tokensOut;
-    if (!buyTx) {
-      buyTx = lg.transactionHash;
-      entryBlock =
-        lg.blockNumber != null ? Number(lg.blockNumber) : null;
-    }
+    from = to + 1n;
   }
   return { quoteIn, tokens, buyTx, entryBlock, n: seen.size };
 }
@@ -155,8 +204,15 @@ export async function scanObserveRange(wallet, fromBlock, toBlock) {
 
   let from = BigInt(fromBlock);
   const end = BigInt(toBlock);
+  const span = end >= from ? end - from + 1n : 0n;
+  let chunksDone = 0;
+  const chunksTotal = span === 0n ? 0 : Number((span + CHUNK - 1n) / CHUNK);
   while (from <= end) {
     const to = from + CHUNK - 1n > end ? end : from + CHUNK - 1n;
+    chunksDone += 1;
+    if (chunksTotal > 20 && chunksDone % 25 === 0) {
+      log(`[observe] launch scan ${chunksDone}/${chunksTotal} →${to}`);
+    }
     const [launchLogs, distLogs] = await Promise.all([
       client.getLogs({
         address: getAddress(LAUNCH),
@@ -220,11 +276,26 @@ export async function scanObserveRange(wallet, fromBlock, toBlock) {
     }
   }
 
+  // Explorer-held tokens: catches follow bags launched outside the lookback window.
+  for (const token of await fetchHeldTokenAddresses(me).catch(() => [])) {
+    if (pools.has(token)) continue;
+    const meta = await fetchMeta(token, null);
+    if (!meta.curve) continue;
+    pools.set(token, {
+      curve: meta.curve,
+      pair: meta.pair,
+      launch_block: null,
+      launch_tx: null,
+    });
+  }
+
   const ethPx = await ethUsdMark().catch(() => null);
   const fromB = BigInt(fromBlock);
   const toB = BigInt(toBlock);
   let n = 0;
 
+  // Balance-first: only pull CurveBuy history for tokens the wallet still holds.
+  // (Per-curve getLogs over the full lookback for every launch is too heavy.)
   for (const [token, base] of pools) {
     if (!base.curve) continue;
     let bal = 0n;
@@ -238,6 +309,7 @@ export async function scanObserveRange(wallet, fromBlock, toBlock) {
     } catch {
       continue;
     }
+    if (bal <= 0n) continue;
 
     const buy = await buysOnCurve(base.curve, me, fromB, toB).catch(() => ({
       quoteIn: 0n,
@@ -246,8 +318,6 @@ export async function scanObserveRange(wallet, fromBlock, toBlock) {
       entryBlock: null,
       n: 0,
     }));
-
-    if (bal <= 0n && buy.n === 0) continue;
 
     const meta = await fetchMeta(token, base.curve);
     const dist =
@@ -266,7 +336,7 @@ export async function scanObserveRange(wallet, fromBlock, toBlock) {
       launch_tx: base.launch_tx,
     });
 
-    const tokens = bal > 0n ? bal : buy.tokens;
+    const tokens = bal;
     const quoteIn = buy.quoteIn > 0n ? buy.quoteIn : 0n;
     const cost_usd = costUsdFor(meta.pair ?? base.pair, quoteIn, ethPx);
     const prev = db()
@@ -302,41 +372,40 @@ export async function scanObserveRange(wallet, fromBlock, toBlock) {
 }
 
 /**
- * Backfill from lookback (or last cursor) then follow head for new buys.
+ * Backfill lookback on every start (cursor must not skip that), then tick with a
+ * wide launch re-check window so buys on slightly-older pools still appear.
  */
 export async function startObserve(wallet) {
   const client = publicClient();
   const head = await client.getBlockNumber();
-  const saved = getCursor(CURSOR);
-  let from;
-  if (saved != null && Number.isFinite(Number(saved))) {
-    from = BigInt(saved) + 1n;
-  } else {
-    const lookback = BigInt(Math.max(0, config.readLookbackBlocks));
-    from = head > lookback ? head - lookback : 0n;
-  }
-  if (from <= head) {
-    log(
-      `[observe] sync wallet=${wallet} blocks ${from}→${head} lookback=${config.readLookbackBlocks}`,
-    );
+  const lookback = BigInt(Math.max(0, config.readLookbackBlocks));
+  const from = head > lookback ? head - lookback : 0n;
+  log(
+    `[observe] sync wallet=${wallet} blocks ${from}→${head} lookback=${config.readLookbackBlocks}`,
+  );
+  try {
     const n = await scanObserveRange(wallet, from, head);
     log(`[observe] synced ${n} position(s)`);
+  } catch (e) {
+    log(`[observe] sync err ${e.message}`);
   }
   setCursor(CURSOR, String(head));
 
+  const recheck = BigInt(Math.max(1_000, config.observeRecheckBlocks));
+  let ticking = false;
   const timer = setInterval(async () => {
+    if (ticking) return;
+    ticking = true;
     try {
-      const cur = getCursor(CURSOR);
-      const start = cur != null ? BigInt(cur) + 1n : head + 1n;
       const tip = await client.getBlockNumber();
-      // Overlap a bit so we don't miss; always re-check known pools' balances.
-      const fromTick = start > 50n ? start - 50n : start;
-      if (fromTick > tip) return;
+      const fromTick = tip > recheck ? tip - recheck : 0n;
       const n = await scanObserveRange(wallet, fromTick, tip);
       setCursor(CURSOR, String(tip));
       if (n > 0) log(`[observe] tick positions=${n} @${tip}`);
     } catch (e) {
       log("[observe] tick err", e.message);
+    } finally {
+      ticking = false;
     }
   }, 12_000);
 

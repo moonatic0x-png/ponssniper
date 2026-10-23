@@ -192,6 +192,8 @@ READ_ADDRESS=0xYourSniperAddress
 # On the dash machine only, optional separate DB:
 # DB_PATH=data/pons-read.db
 # READ_LOOKBACK_BLOCKS=1000000
+# OBSERVE_RECHECK_BLOCKS=100000
+# BLOCKSCOUT_API_KEY=   # optional; discover held tokens outside lookback
 
 # Dash machine:
 npm run observe

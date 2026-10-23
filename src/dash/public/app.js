@@ -15,7 +15,15 @@ function ago(ts) {
   const s = Math.max(0, (Date.now() - Number(ts)) / 1000);
   if (s < 60) return Math.floor(s) + "s";
   if (s < 3600) return Math.floor(s / 60) + "m";
-  return Math.floor(s / 3600) + "h";
+  if (s < 86400) return Math.floor(s / 3600) + "h";
+  return Math.floor(s / 86400) + "d";
+}
+
+function esc(s) {
+  return String(s ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/"/g, "&quot;");
 }
 
 function bagLabel(p) {
@@ -24,12 +32,62 @@ function bagLabel(p) {
     try {
       const d = p.decimals ?? 18;
       const whole = Number(BigInt(p.tokens)) / 10 ** d;
-      return whole.toLocaleString(undefined, { maximumFractionDigits: 0 }) + " tok";
+      return (
+        whole.toLocaleString(undefined, { maximumFractionDigits: 0 }) + " tok"
+      );
     } catch {
       return short(String(p.tokens));
     }
   }
   return "—";
+}
+
+function linkCell(p) {
+  const bits = [];
+  if (p.pons_url) {
+    bits.push(
+      `<a class="ext" href="${esc(p.pons_url)}" target="_blank" rel="noopener" onclick="event.stopPropagation()">Pons</a>`,
+    );
+  }
+  if (p.explorer_token_url) {
+    bits.push(
+      `<a class="ext" href="${esc(p.explorer_token_url)}" target="_blank" rel="noopener" onclick="event.stopPropagation()">Token</a>`,
+    );
+  }
+  if (p.explorer_buy_url) {
+    bits.push(
+      `<a class="ext" href="${esc(p.explorer_buy_url)}" target="_blank" rel="noopener" onclick="event.stopPropagation()">Buy</a>`,
+    );
+  }
+  if (p.explorer_claim_url) {
+    bits.push(
+      `<a class="ext" href="${esc(p.explorer_claim_url)}" target="_blank" rel="noopener" onclick="event.stopPropagation()">Claim</a>`,
+    );
+  }
+  return bits.length ? bits.join(" · ") : "—";
+}
+
+function rowOpen(url) {
+  if (!url) return "";
+  return `class="row-link" tabindex="0" data-href="${esc(url)}" title="Open on Pons"`;
+}
+
+function bindRowClicks(tbody) {
+  if (!tbody || tbody._bound) return;
+  tbody._bound = true;
+  tbody.addEventListener("click", (e) => {
+    if (e.target.closest("a")) return;
+    const tr = e.target.closest("tr[data-href]");
+    if (!tr?.dataset.href) return;
+    window.open(tr.dataset.href, "_blank", "noopener");
+  });
+  tbody.addEventListener("keydown", (e) => {
+    if (e.key !== "Enter" && e.key !== " ") return;
+    const tr = e.target.closest("tr[data-href]");
+    if (!tr?.dataset.href) return;
+    e.preventDefault();
+    window.open(tr.dataset.href, "_blank", "noopener");
+  });
 }
 
 async function refresh() {
@@ -61,44 +119,56 @@ async function refresh() {
       (a) =>
         `<tr>
           <td class="mono">${ago(a.created_at)}</td>
-          <td>${a.kind}</td>
-          <td class="mono">${short(a.token)}</td>
-          <td>${(a.detail || "").slice(0, 64)}</td>
+          <td>${esc(a.kind)}</td>
+          <td class="mono" title="${esc(a.token || "")}">${short(a.token)}</td>
+          <td title="${esc(a.detail || "")}">${esc((a.detail || "").slice(0, 72))}</td>
           <td class="mono">${a.latency_ms != null ? Number(a.latency_ms).toFixed(0) : ""}</td>
         </tr>`,
     )
     .join("");
 
   $("posBody").innerHTML = (s.positions || [])
-    .map(
-      (p) =>
-        `<tr>
-          <td>${p.symbol || short(p.token)}</td>
-          <td>${p.strategy || "snipe"}</td>
-          <td class="mono">${p.entry_epoch ?? "—"}</td>
-          <td class="mono">${p.current_epoch ?? "—"}</td>
+    .map((p) => {
+      const epoch =
+        p.entry_epoch != null || p.current_epoch != null
+          ? `${p.entry_epoch ?? "—"}→${p.current_epoch ?? "—"}`
+          : "—";
+      const name = p.symbol || short(p.token);
+      return `<tr ${rowOpen(p.pons_url)}>
+          <td title="${esc(p.token)}"><span class="tok">${esc(name)}</span></td>
+          <td>${esc(p.pair_symbol || short(p.pair) || "ETH")}</td>
+          <td>${esc(p.strategy || "snipe")}</td>
+          <td class="mono">${bagLabel(p)}</td>
+          <td class="mono">${fmtUsd(p.pot_usd)}</td>
+          <td class="mono">${p.holder_count ?? "—"}</td>
+          <td class="mono">${epoch}</td>
           <td class="${p.published ? "yes" : "no"}">${p.published ? "yes" : "no"}</td>
           <td class="${p.payout ? "yes" : "no"}">${p.payout ? "yes" : "no"}</td>
-          <td class="mono">${fmtUsd(p.claim_usd)} (${p.claim_count})</td>
-          <td class="mono">${bagLabel(p)}</td>
+          <td class="mono" title="${p.claim_at ? "last " + ago(p.claim_at) + " ago" : ""}">${fmtUsd(p.claim_usd)}${p.claim_count ? ` (${p.claim_count})` : ""}</td>
           <td class="mono">${fmtUsd(p.cost_usd)}</td>
-          <td class="${p.status === "dry" ? "dry" : ""}">${p.status}</td>
-        </tr>`,
-    )
+          <td>${esc(p.phase || "—")}</td>
+          <td class="${p.status === "dry" ? "dry" : ""}">${esc(p.status)}</td>
+          <td class="links">${linkCell(p)}</td>
+        </tr>`;
+    })
     .join("");
 
   $("potBody").innerHTML = (s.held_pools || [])
     .map(
       (p) =>
-        `<tr>
-          <td>${p.symbol || short(p.token)}</td>
+        `<tr ${rowOpen(p.pons_url)}>
+          <td title="${esc(p.token)}"><span class="tok">${esc(p.symbol || short(p.token))}</span></td>
           <td class="mono">${fmtUsd(p.pot_usd)}</td>
           <td class="mono">${p.holder_count ?? "—"}</td>
-          <td>${p.phase || "—"}</td>
+          <td>${esc(p.phase || "—")}</td>
           <td class="mono">${ago(p.refreshed_at)}</td>
+          <td class="links">${linkCell(p)}</td>
         </tr>`,
     )
     .join("");
+
+  bindRowClicks($("posBody"));
+  bindRowClicks($("potBody"));
 }
 
 refresh();

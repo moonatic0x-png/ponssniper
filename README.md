@@ -79,7 +79,7 @@ Every attempt logs:
 
 `detect_ts → gate_ts → tx_hash_ts` (as `detect→gate`, `gate→tx`, `detect→tx` ms).
 
-WSS: `RPC_WSS` (default `wss://robinhood.drpc.org`). Writes: official `RPC_HTTP`.
+RPC: multi-endpoint pool via `RPC_HTTP_URLS` / `RPC_WSS_URLS` (or legacy `RPC_HTTP` + `RPC_HTTP_FALLBACK` + built-in public endpoints). Official-first; on failure the client walks the rest of the pool.
 
 ## Scripts
 

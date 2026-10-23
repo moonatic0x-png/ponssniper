@@ -53,20 +53,28 @@
 
     <section id="positions">
       <h2>Positions</h2>
+      <p class="hint">
+        Click a row to open the pot on Pons. Use explorer links for on-chain
+        detail.
+      </p>
       <div class="table-wrap">
         <table>
           <thead>
             <tr>
               <th>Token</th>
+              <th>Pair</th>
               <th>Strategy</th>
-              <th>Entry epoch</th>
-              <th>Current</th>
+              <th>Bag</th>
+              <th>Pot</th>
+              <th>Holders</th>
+              <th>Epoch</th>
               <th>Published</th>
               <th>Payout</th>
               <th>Claims</th>
-              <th>Bag</th>
               <th>Cost</th>
+              <th>Phase</th>
               <th>Status</th>
+              <th>Links</th>
             </tr>
           </thead>
           <tbody id="posBody"></tbody>
@@ -78,7 +86,7 @@
       <h2>Held pools — pot &amp; holders</h2>
       <p class="hint">
         Holders = non-dust ERC20 balances via Transfer walk + balanceOf &gt; dust
-        (system contracts excluded).
+        (system contracts excluded). Rows open the Pons pot.
       </p>
       <div class="table-wrap">
         <table>
@@ -89,6 +97,7 @@
               <th>Holders</th>
               <th>Phase</th>
               <th>Refresh</th>
+              <th>Links</th>
             </tr>
           </thead>
           <tbody id="potBody"></tbody>

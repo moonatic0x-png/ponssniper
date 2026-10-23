@@ -17,9 +17,14 @@ All notable changes to this project are documented here.
 - `executeBuy` accepts optional `delayMs` (follow defaults to 0; sniper still uses `SNIPER_DELAY_MS`).
 - Snipe-tax `delayMs` now runs **before** ETH→quote cover (not after), so a failed buy cannot strand freshly swapped quote.
 
+### Changed
+
+- RPC clients use a failover HTTP/WSS pool (`RPC_HTTP_URLS` / `RPC_WSS_URLS`, plus built-in public endpoints). Official-first order; on error viem tries the next URL (fewer buy-path RPC failures).
+
 ### Fixed
 
 - Cover→buy abort could leave quote on the wallet with no `curve.buy`: router `minOut` used slipped shortfall (fill could be `< need` → `cover_short`), approve used `estimateGas`, and live `simulate_fail` aborted after funding. Now require full fill (+ one top-up), fixed-gas approve via the cover nonce path, and still send the buy after a live simulate miss.
+- Observe dash missed remote sniper positions: cursor skipped lookback on restart and ticks only re-scanned ~50 launch blocks. Now always backfills `READ_LOOKBACK_BLOCKS` on start, re-checks `OBSERVE_RECHECK_BLOCKS` (default 100k) each tick, balance-first CurveBuy fetch, and optional Blockscout held-token discovery for follow bags outside lookback.
 
 ## [1.1.0] — 2026-10-23
 

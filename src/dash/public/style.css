@@ -142,3 +142,41 @@ tr:last-child td {
   color: var(--ink);
   font-size: 0.85em;
 }
+
+tr.row-link {
+  cursor: pointer;
+}
+
+tr.row-link:hover td {
+  background: rgba(111, 191, 122, 0.08);
+}
+
+tr.row-link:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: -1px;
+}
+
+tr.row-link .tok {
+  color: var(--accent);
+  text-decoration: underline;
+  text-decoration-color: transparent;
+  text-underline-offset: 2px;
+}
+
+tr.row-link:hover .tok {
+  text-decoration-color: var(--accent);
+}
+
+.links {
+  white-space: nowrap;
+}
+
+a.ext {
+  color: var(--muted);
+  text-decoration: none;
+}
+
+a.ext:hover {
+  color: var(--ink);
+  text-decoration: underline;
+}
