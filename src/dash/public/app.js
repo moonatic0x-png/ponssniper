@@ -28,6 +28,20 @@ function esc(s) {
 
 function bagLabel(p) {
   if (p.bag_mark_usd != null) return fmtUsd(p.bag_mark_usd);
+  // Quote mark without USD (rare) — prefer over raw token count.
+  if (p.bag_mark_quote != null && p.bag_mark_quote !== "0") {
+    try {
+      const q = Number(BigInt(p.bag_mark_quote)) / 1e18;
+      const sym = p.pair_symbol || "quote";
+      if (Number.isFinite(q) && q > 0) {
+        return (
+          q.toLocaleString(undefined, { maximumFractionDigits: 6 }) + " " + sym
+        );
+      }
+    } catch {
+      /* fall through */
+    }
+  }
   if (p.tokens) {
     try {
       const d = p.decimals ?? 18;
