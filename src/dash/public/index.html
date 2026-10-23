@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>PONS Sniper</title>
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+  <body>
+    <header>
+      <h1>PONS V2 Hold</h1>
+      <p class="sub">
+        Launch sniper · never sell ·
+        <span id="mode">…</span>
+      </p>
+    </header>
+
+    <section id="networth">
+      <h2>Net worth &amp; activity</h2>
+      <div class="nw-row">
+        <div>
+          <div class="label">Total USD</div>
+          <div class="big" id="totalUsd">—</div>
+        </div>
+        <div>
+          <div class="label">Claims USD (cumul.)</div>
+          <div class="num" id="claimsUsd">—</div>
+        </div>
+        <div>
+          <div class="label">Updated</div>
+          <div class="num" id="snapAt">—</div>
+        </div>
+      </div>
+      <h3>Recent actions</h3>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Time</th>
+              <th>Kind</th>
+              <th>Token</th>
+              <th>Detail</th>
+              <th>ms</th>
+            </tr>
+          </thead>
+          <tbody id="actions"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="positions">
+      <h2>Positions</h2>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Token</th>
+              <th>Entry epoch</th>
+              <th>Current</th>
+              <th>Published</th>
+              <th>Payout</th>
+              <th>Claims</th>
+              <th>Bag</th>
+              <th>Cost</th>
+              <th>Status</th>
+            </tr>
+          </thead>
+          <tbody id="posBody"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="pots">
+      <h2>Held pools — pot &amp; holders</h2>
+      <p class="hint">
+        Holders = non-dust ERC20 balances via Transfer walk + balanceOf &gt; dust
+        (system contracts excluded).
+      </p>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Token</th>
+              <th>Pot USD</th>
+              <th>Holders</th>
+              <th>Phase</th>
+              <th>Refresh</th>
+            </tr>
+          </thead>
+          <tbody id="potBody"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <script src="/app.js"></script>
+  </body>
+</html>

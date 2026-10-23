@@ -1,0 +1,12 @@
+node_modules/
+.env
+.env.*
+!.env.example
+data/*
+!data/.gitkeep
+secrets/*
+!secrets/.gitkeep
+*.log
+.DS_Store
+*.pem
+*.key
