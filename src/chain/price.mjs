@@ -88,3 +88,25 @@ export async function along(hops, amount) {
 
 export const reverseHops = (hops) =>
   [...hops].reverse().map(([a, b, f]) => [b, a, f]);
+
+const ethUsdCache = { v: null, at: 0 };
+const ETH_USD_TTL_MS = 60_000;
+
+/**
+ * ETH/WETH mark in USD via QuoterV3 best fee tier (WETH→USDG).
+ * Cached briefly. Returns null when the pool quote fails — never a hardcoded default.
+ */
+export async function ethUsdMark() {
+  const now = Date.now();
+  if (ethUsdCache.v != null && now - ethUsdCache.at < ETH_USD_TTL_MS) {
+    return ethUsdCache.v;
+  }
+  const one = 10n ** 18n;
+  const { out } = await bestTier(WETH, USDG, one);
+  if (!out || out <= 0n) return null;
+  const px = Number(out) / 1e6;
+  if (!Number.isFinite(px) || px <= 0) return null;
+  ethUsdCache.v = px;
+  ethUsdCache.at = now;
+  return px;
+}

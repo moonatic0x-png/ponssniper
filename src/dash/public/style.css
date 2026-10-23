@@ -133,3 +133,12 @@ tr:last-child td {
 .mono {
   font-variant-numeric: tabular-nums;
 }
+
+.wallet-wrap.hidden {
+  display: none;
+}
+
+.wallet-wrap .mono {
+  color: var(--ink);
+  font-size: 0.85em;
+}

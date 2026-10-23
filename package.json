@@ -11,6 +11,7 @@
     "sniper": "node scripts/sniper.mjs",
     "watcher": "node scripts/watcher.mjs",
     "dash": "node scripts/dash.mjs",
+    "observe": "node scripts/observe.mjs",
     "start": "node scripts/start.mjs",
     "smoke": "node scripts/smoke.mjs",
     "test": "node --test test/*.test.mjs"

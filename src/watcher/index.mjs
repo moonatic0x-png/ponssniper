@@ -17,6 +17,7 @@ import {
 } from "../db/db.mjs";
 import { countHolders } from "./holders.mjs";
 import { snapshotNetWorth } from "./networth.mjs";
+import { startObserve } from "./observe.mjs";
 import { quoteToUsd } from "./price.mjs";
 
 function heldRows() {
@@ -74,7 +75,7 @@ async function refreshPool(row) {
     log("[watcher] holders fail", e.message);
   }
 
-  const potUsd = quoteToUsd(row.pair, unalloc);
+  const potUsd = await quoteToUsd(row.pair, unalloc);
 
   upsertPoolStats({
     token: row.token,
@@ -137,7 +138,7 @@ async function handleDistLog(lg, row, me) {
         topics: lg.topics,
       });
       if (lower(args.account) !== me) return;
-      const usd = quoteToUsd(row.pair, args.quoteAmount);
+      const usd = await quoteToUsd(row.pair, args.quoteAmount);
       insertClaim({
         token: row.token,
         epoch_id: Number(args.epochId),
@@ -160,9 +161,14 @@ async function handleDistLog(lg, row, me) {
 /**
  * Watch epochs/claims via WSS on held distributors; refresh pot/holders; net worth.
  * No sell. Claims: watch Claimed for our wallet only (no claim executor).
+ * READ mode: also backfill/follow CurveBuy for config.readAddress into local DB.
  */
 export async function startWatcher(wallets) {
   const wallet = wallets.sniper.address;
+  let observe = null;
+  if (config.readOnly) {
+    observe = await startObserve(wallet);
+  }
   let unwatch = null;
   let distSet = new Set();
 
@@ -214,8 +220,9 @@ export async function startWatcher(wallets) {
 
   async function tickNet() {
     const s = await snapshotNetWorth(wallet);
+    const fmt = (n) => (n == null ? "n/a" : Number(n).toFixed(2));
     log(
-      `[networth] totalUsd=${s.totalUsd.toFixed(2)} ethUsd=${s.ethUsd.toFixed(2)} claimsUsd=${Number(s.claimsUsd).toFixed(2)}`,
+      `[networth] totalUsd=${fmt(s.totalUsd)} ethUsd=${fmt(s.ethUsd)} claimsUsd=${fmt(s.claimsUsd)}`,
     );
   }
 
@@ -229,13 +236,17 @@ export async function startWatcher(wallets) {
     8_000,
   );
 
-  log(`[watcher] started wallet=${wallet}`);
+  log(
+    `[watcher] started wallet=${wallet}` +
+      (config.readOnly ? " mode=READ" : ""),
+  );
 
   return {
     stop() {
       clearInterval(potTimer);
       clearInterval(netTimer);
       clearInterval(pollTimer);
+      observe?.stop();
       try {
         unwatch?.();
       } catch {

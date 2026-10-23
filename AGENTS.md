@@ -124,6 +124,24 @@ If `buy_fail` / `simulate_fail` / `insufficient_quote` / `insufficient_eth`: fix
 
 ---
 
+## Phase G — Read-only dash (remote sniper)
+
+Watch another machine’s sniper **without** copying keys. On this machine:
+
+```bash
+# .env
+READ_ADDRESS=0xYourSniperAddress
+DB_PATH=data/pons-read.db          # optional: keep separate from a local sniper DB
+# READ_LOOKBACK_BLOCKS=1000000     # first sync window (~28h at ~0.1s blocks)
+
+npm run observe                    # watcher (chain backfill + follow) + dash
+# open http://127.0.0.1:42100 — badge shows READ + wallet
+```
+
+- No `secrets/wallets.json` required. `npm run sniper` refuses to start when `READ_ADDRESS` is set.
+- `npm start` with `READ_ADDRESS` skips the hot path (observe + dash only).
+- Observer scans `CurveBuy` for that address into local SQLite; then pot/claims/net worth work like the normal watcher.
+
 ## Commands cheat sheet
 
 | Command | Purpose |
@@ -133,7 +151,8 @@ If `buy_fail` / `simulate_fail` / `insufficient_quote` / `insufficient_eth`: fix
 | `npm run sniper` | Hot path listener + buy |
 | `npm run watcher` | Epochs, claims, pot, holders, net worth |
 | `npm run dash` | http://127.0.0.1:42100 |
-| `npm start` | All three |
+| `npm run observe` | Read-only: backfill remote wallet + dash |
+| `npm start` | All three (or observe+dash if `READ_ADDRESS`) |
 | `npm test` | Gate + curve math |
 | `npm run smoke` | Live RPC/WSS DRY probe |
 

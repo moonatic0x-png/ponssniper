@@ -6,6 +6,7 @@ All notable changes to this project are documented here.
 
 ### Added
 
+- **Read-only observe mode** (`READ_ADDRESS`): watch a remote sniper wallet with no private key — `npm run observe` backfills `CurveBuy` into local DB and runs watcher+dash (`READ` badge). `npm start` skips hotpath; `npm run sniper` refuses.
 - **Automatic ETH → quote funding** before every buy (`src/sniper/coverQuote.mjs`), same idea as pons-fastpath `coverQuote`:
   1. Size curve buy for 100k tokens → `quoteNeeded`
   2. Native ETH pair → spend ETH on `curve.buy` (`value`); no swap

@@ -1,6 +1,7 @@
 import { readFileSync, existsSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { getAddress, isAddress } from "viem";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -46,13 +47,27 @@ const big = (k) => {
     return null;
   }
 };
+const addr = (k) => {
+  const v = process.env[k];
+  if (v == null || v === "") return null;
+  if (!isAddress(v)) throw new Error(`Invalid ${k}: ${v}`);
+  return getAddress(v);
+};
 
 export const ROOT_DIR = ROOT;
 export const CHAIN_ID = 4663;
 export const BLOCK_TIME_S = 0.1008;
 
+/** Observe-only wallet (no private key). Set READ_ADDRESS to enable. */
+const readAddress = addr("READ_ADDRESS");
+
 export const config = {
   live: bool("SNIPER_LIVE", false),
+  /** True when READ_ADDRESS is set — watcher+dash only, no buys. */
+  readOnly: readAddress != null,
+  readAddress,
+  /** How far back to scan CurveBuy / launches on observe start (~0.1s blocks). */
+  readLookbackBlocks: num("READ_LOOKBACK_BLOCKS", 1_000_000),
   rpcHttp: process.env.RPC_HTTP || "https://rpc.mainnet.chain.robinhood.com",
   rpcWss: process.env.RPC_WSS || "wss://robinhood.drpc.org",
   rpcHttpFallback:
@@ -75,7 +90,6 @@ export const config = {
   walletsPath: resolve(ROOT, "secrets/wallets.json"),
   dashHost: process.env.DASH_HOST || "127.0.0.1",
   dashPort: num("DASH_PORT", 42100),
-  ethUsd: num("ETH_USD", 3000),
 };
 
 /** Redact private-key-shaped hex from log strings. */

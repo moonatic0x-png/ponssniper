@@ -11,6 +11,7 @@ import {
   Multicall3Abi,
 } from "../chain/abis.mjs";
 import { KNOWN_QUOTES, LAUNCH, MULTICALL3, ZERO, lower } from "../chain/addresses.mjs";
+import { ethUsdMark } from "../chain/price.mjs";
 import { publicClient } from "../chain/clients.mjs";
 import { config, log } from "../config.mjs";
 import {
@@ -273,7 +274,8 @@ export async function startHotpath(wallets) {
         const pairMeta = KNOWN_QUOTES[pair || ZERO];
         let costUsd = null;
         if (pairMeta?.symbol === "ETH" || pair === ZERO) {
-          costUsd = (Number(plan.quoteIn) / 1e18) * config.ethUsd;
+          const px = await ethUsdMark();
+          if (px != null) costUsd = (Number(plan.quoteIn) / 1e18) * px;
         } else if (pairMeta?.symbol === "USDG") {
           costUsd = Number(plan.quoteIn) / 1e6;
         }

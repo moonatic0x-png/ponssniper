@@ -1,9 +1,9 @@
 import { getAddress } from "viem";
 import { CurveAbi, Erc20Abi } from "../chain/abis.mjs";
 import { KNOWN_QUOTES, ZERO } from "../chain/addresses.mjs";
+import { ethUsdMark } from "../chain/price.mjs";
 import { sellOutFor } from "../chain/curveMath.mjs";
 import { publicClient } from "../chain/clients.mjs";
-import { config } from "../config.mjs";
 import { db, insertSnapshot, upsertPoolStats } from "../db/db.mjs";
 import { quoteToUsd } from "./price.mjs";
 
@@ -11,10 +11,13 @@ export async function snapshotNetWorth(walletAddress) {
   const client = publicClient();
   const me = getAddress(walletAddress);
   const eth = await client.getBalance({ address: me });
-  const ethUsd = (Number(eth) / 1e18) * config.ethUsd;
+  const ethPx = eth === 0n ? null : await ethUsdMark();
+  const ethUsd =
+    eth === 0n ? 0 : ethPx == null ? null : (Number(eth) / 1e18) * ethPx;
 
   const quotes = {};
   let quotesUsd = 0;
+  let quotesMarked = true;
   for (const [addr, meta] of Object.entries(KNOWN_QUOTES)) {
     if (addr === ZERO) continue;
     try {
@@ -24,9 +27,10 @@ export async function snapshotNetWorth(walletAddress) {
         functionName: "balanceOf",
         args: [me],
       });
-      const usd = quoteToUsd(addr, bal) ?? 0;
+      const usd = await quoteToUsd(addr, bal);
+      if (usd == null && bal > 0n) quotesMarked = false;
       quotes[meta.symbol] = { raw: String(bal), usd };
-      quotesUsd += usd;
+      if (usd != null) quotesUsd += usd;
     } catch {
       /* */
     }
@@ -42,6 +46,7 @@ export async function snapshotNetWorth(walletAddress) {
 
   const bags = {};
   let bagsUsd = 0;
+  let bagsMarked = true;
   for (const pos of positions) {
     try {
       const bal = await client.readContract({
@@ -82,7 +87,8 @@ export async function snapshotNetWorth(walletAddress) {
           bal,
         );
       }
-      const usd = quoteToUsd(pos.pair || ZERO, markQuote) ?? 0;
+      const usd = await quoteToUsd(pos.pair || ZERO, markQuote);
+      if (usd == null && markQuote > 0n) bagsMarked = false;
       bags[pos.token] = {
         symbol: pos.symbol,
         bal: String(bal),
@@ -90,7 +96,7 @@ export async function snapshotNetWorth(walletAddress) {
         usd,
         graduated,
       };
-      bagsUsd += usd;
+      if (usd != null) bagsUsd += usd;
       upsertPoolStats({
         token: pos.token,
         bag_mark_quote: markQuote,
@@ -107,7 +113,11 @@ export async function snapshotNetWorth(walletAddress) {
 
   // Wallet net worth: ETH + quote balances + marked bags.
   // Cumulative claims already sit in quote balances once paid; we surface claimsUsd separately.
-  const totalUsd = ethUsd + quotesUsd + bagsUsd;
+  // Null total when any ETH/quote mark failed — never invent a USD price.
+  const totalUsd =
+    ethUsd == null || !quotesMarked || !bagsMarked
+      ? null
+      : ethUsd + quotesUsd + bagsUsd;
 
   insertSnapshot({
     eth_wei: eth,

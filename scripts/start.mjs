@@ -8,8 +8,17 @@ import { startDash } from "../src/dash/server.mjs";
 
 openDb();
 const wallets = loadWallets();
-log(`start LIVE=${config.live ? 1 : 0} wallet=${wallets.sniper.address}`);
-await startHotpath(wallets);
-await startWatcher(wallets);
-startDash();
+
+if (config.readOnly) {
+  log(
+    `start READ wallet=${wallets.sniper.address} (no sniper — observe + dash only)`,
+  );
+  startDash();
+  await startWatcher(wallets);
+} else {
+  log(`start LIVE=${config.live ? 1 : 0} wallet=${wallets.sniper.address}`);
+  await startHotpath(wallets);
+  await startWatcher(wallets);
+  startDash();
+}
 await new Promise(() => {});

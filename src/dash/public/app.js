@@ -35,8 +35,21 @@ function bagLabel(p) {
 async function refresh() {
   const r = await fetch("/api/state");
   const s = await r.json();
-  $("mode").textContent = s.live ? "LIVE" : "DRY";
-  $("mode").style.color = s.live ? "#c45c5c" : "#6fbf7a";
+  if (s.readOnly) {
+    $("mode").textContent = "READ";
+    $("mode").style.color = "#6a9ecf";
+  } else {
+    $("mode").textContent = s.live ? "LIVE" : "DRY";
+    $("mode").style.color = s.live ? "#c45c5c" : "#6fbf7a";
+  }
+  const ww = $("walletWrap");
+  if (s.wallet) {
+    ww.classList.remove("hidden");
+    $("wallet").textContent = s.wallet;
+    $("wallet").title = s.wallet;
+  } else {
+    ww.classList.add("hidden");
+  }
 
   const snap = s.snapshot;
   $("totalUsd").textContent = snap ? fmtUsd(snap.total_usd) : "—";
