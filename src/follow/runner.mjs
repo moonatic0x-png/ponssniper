@@ -25,7 +25,7 @@ import {
 /** Quote / system tokens — never Pons launch tokens. */
 const SKIP_TOKENS = new Set([ZERO, WETH, USDG, lower(LAUNCH), lower(DIST_FACTORY)]);
 import { ethUsdMark } from "../chain/price.mjs";
-import { publicClient } from "../chain/clients.mjs";
+import { withRotatedHttp } from "../chain/clients.mjs";
 import { config, log } from "../config.mjs";
 import {
   countOpenFollows,
@@ -46,7 +46,7 @@ import { evaluateFollowGates } from "./gates.mjs";
 import { planBuyUsd } from "./plan.mjs";
 
 async function resolvePool(token) {
-  const client = publicClient();
+  return withRotatedHttp(async (client) => {
   const tokenA = getAddress(token);
   const calls = [
     {
@@ -174,6 +174,7 @@ async function resolvePool(token) {
     },
     unallocated,
   };
+  });
 }
 
 async function costUsdFor(pair, quoteIn) {
@@ -342,11 +343,13 @@ export async function tryFollow(ev, ctx) {
       if (pool.distributor) {
         try {
           entryEpoch = Number(
-            await publicClient().readContract({
-              address: getAddress(pool.distributor),
-              abi: DistributorAbi,
-              functionName: "epochCount",
-            }),
+            await withRotatedHttp((c) =>
+              c.readContract({
+                address: getAddress(pool.distributor),
+                abi: DistributorAbi,
+                functionName: "epochCount",
+              }),
+            ),
           );
         } catch {
           /* */

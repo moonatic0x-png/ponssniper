@@ -1,7 +1,7 @@
 import { decodeEventLog, getAddress, parseAbiItem } from "viem";
 import { Erc20Abi, TOPICS } from "../chain/abis.mjs";
 import { lower } from "../chain/addresses.mjs";
-import { publicClient, wssClient } from "../chain/clients.mjs";
+import { withRotatedHttp, wssClient } from "../chain/clients.mjs";
 import { config, log } from "../config.mjs";
 import { farmerAddresses } from "./farmers.mjs";
 
@@ -102,23 +102,22 @@ export function startFarmerTransferListener({
 
   async function startPoll() {
     if (pollTimer || stopped) return;
-    const client = publicClient();
     if (lastBlock == null) {
-      lastBlock = Number(await client.getBlockNumber()) - 2;
+      lastBlock =
+        Number(await withRotatedHttp((c) => c.getBlockNumber())) - 2;
     }
-    log("[follow/poll] HTTP from block", lastBlock);
+    log("[follow/poll] HTTP (rotating RPC) from block", lastBlock);
     pollTimer = setInterval(async () => {
       if (stopped) return;
       try {
-        const head = Number(await client.getBlockNumber());
+        const head = Number(
+          await withRotatedHttp((c) => c.getBlockNumber()),
+        );
         const from = lastBlock + 1;
         if (from > head) return;
         const to = Math.min(head, from + 1_999);
-        const logs = await fetchFarmerTransfers(
-          client,
-          farmerAddrs,
-          BigInt(from),
-          BigInt(to),
+        const logs = await withRotatedHttp((c) =>
+          fetchFarmerTransfers(c, farmerAddrs, BigInt(from), BigInt(to)),
         );
         await handleLogs(logs);
         lastBlock = to;
@@ -133,8 +132,7 @@ export function startFarmerTransferListener({
     startPoll();
   });
 
-  publicClient()
-    .getBlockNumber()
+  withRotatedHttp((c) => c.getBlockNumber())
     .then((b) => {
       lastBlock = Number(b);
     })
@@ -165,21 +163,22 @@ export async function lookbackFarmerTransfers({
   farmers = farmerAddresses(),
   lookbackBlocks = config.followLookbackBlocks,
 }) {
-  const client = publicClient();
-  const head = await client.getBlockNumber();
+  const head = await withRotatedHttp((c) => c.getBlockNumber());
   const lookback = BigInt(Math.max(0, lookbackBlocks));
   if (lookback === 0n) return { from: head, head, n: 0 };
   const from = head > lookback ? head - lookback : 0n;
   const farmerSet = new Set(farmers.map(lower));
   const farmerAddrs = farmers.map((a) => getAddress(a));
-  log(`[follow] lookback Transfer blocks ${from}→${head}`);
+  log(`[follow] lookback Transfer blocks ${from}→${head} (rotating RPC)`);
   // Keep chunks small — some free RPC plans reject large eth_getLogs ranges.
   const CHUNK = 1_999n;
   let cur = from;
   let n = 0;
   while (cur <= head) {
     const to = cur + CHUNK - 1n > head ? head : cur + CHUNK - 1n;
-    const logs = await fetchFarmerTransfers(client, farmerAddrs, cur, to);
+    const logs = await withRotatedHttp((c) =>
+      fetchFarmerTransfers(c, farmerAddrs, cur, to),
+    );
     n += await decodeFarmerTransfers(logs, farmerSet, onFarmerTransfer, {
       lookback: true,
     });

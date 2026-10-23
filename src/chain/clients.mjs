@@ -23,6 +23,10 @@ let _public;
 let _write;
 let _writeAddr;
 let _loggedPool = false;
+/** Round-robin cursor for follow/read rotation (separate single-URL clients). */
+let _rotateIdx = 0;
+/** @type {{ url: string, client: ReturnType<typeof createPublicClient> }[] | null} */
+let _httpPool = null;
 
 function logPoolOnce() {
   if (_loggedPool) return;
@@ -110,4 +114,52 @@ export function wssClient() {
     chain: robinhood,
     transport: fallback(transports, { retryCount: 2 }),
   });
+}
+
+function httpPoolClients() {
+  if (_httpPool) return _httpPool;
+  logPoolOnce();
+  const urls = config.rpcHttpUrls.length
+    ? config.rpcHttpUrls
+    : [config.rpcHttp];
+  _httpPool = urls.map((url) => ({
+    url,
+    client: createPublicClient({
+      chain: robinhood,
+      transport: http(url, { timeout: 20_000, retryCount: 1 }),
+    }),
+  }));
+  return _httpPool;
+}
+
+/**
+ * Follow / heavy-read helper: round-robin which RPC is tried first, then walk
+ * the rest of the pool on error. Spreads eth_getLogs load so one endpoint
+ * does not soak every lookback/poll chunk (unlike sticky fallback).
+ *
+ * @template T
+ * @param {(client: ReturnType<typeof createPublicClient>) => Promise<T>} fn
+ * @returns {Promise<T>}
+ */
+export async function withRotatedHttp(fn) {
+  const pool = httpPoolClients();
+  if (!pool.length) throw new Error("no RPC HTTP urls");
+  const start = _rotateIdx % pool.length;
+  _rotateIdx = (_rotateIdx + 1) % 1_000_000_000;
+  let lastErr;
+  for (let i = 0; i < pool.length; i++) {
+    const { url, client } = pool[(start + i) % pool.length];
+    try {
+      return await fn(client);
+    } catch (e) {
+      lastErr = e;
+      if (i < pool.length - 1) {
+        log(
+          `[rpc] rotate skip ${shortUrl(url)}:`,
+          e?.shortMessage || e?.message || e,
+        );
+      }
+    }
+  }
+  throw lastErr;
 }
