@@ -4,7 +4,6 @@ import { ROUTER, WETH, ZERO, lower } from "../chain/addresses.mjs";
 import { along, reverseHops, routeFor } from "../chain/price.mjs";
 import { publicClient, writeClient } from "../chain/clients.mjs";
 import { config, log } from "../config.mjs";
-import { slip } from "../chain/curveMath.mjs";
 
 const deadline = () => BigInt(Math.floor(Date.now() / 1000) + 600);
 
@@ -70,6 +69,22 @@ export async function balanceOf(token, owner) {
   });
 }
 
+async function waitReceipt(client, hash, label) {
+  try {
+    return await client.waitForTransactionReceipt({ hash, timeout: 60_000 });
+  } catch (e) {
+    // Tx may already be mined if the waiter timed out / RPC blipped.
+    for (let i = 0; i < 8; i++) {
+      const rc = await client.getTransactionReceipt({ hash }).catch(() => null);
+      if (rc) return rc;
+      await new Promise((r) => setTimeout(r, 500));
+    }
+    throw new Error(
+      `${label} receipt wait failed ${hash}: ${e.shortMessage || e.message}`,
+    );
+  }
+}
+
 async function sendWarm(warm, label, tx) {
   const client = publicClient();
   const wc = writeClient(warm.state.account);
@@ -83,7 +98,7 @@ async function sendWarm(warm, label, tx) {
     maxPriorityFeePerGas: warm.state.maxPriorityFeePerGas,
   });
   warm.state.nonce = nonce + 1;
-  const rc = await client.waitForTransactionReceipt({ hash });
+  const rc = await waitReceipt(client, hash, label);
   if (rc.status !== "success") {
     await warm.refresh().catch(() => {});
     throw new Error(`${label} reverted ${hash}`);
@@ -91,7 +106,8 @@ async function sendWarm(warm, label, tx) {
   return hash;
 }
 
-async function ensureAllowance(warm, token, spender, amount, live) {
+/** Approve spender for ERC20; fixed gas (no estimateGas — avoids stranding after cover). */
+export async function ensureAllowance(warm, token, spender, amount, live) {
   const client = publicClient();
   const cur = await client.readContract({
     address: getAddress(token),
@@ -112,7 +128,7 @@ async function ensureAllowance(warm, token, spender, amount, live) {
   return sendWarm(warm, "approve", {
     to: getAddress(token),
     data,
-    gas: 80_000n,
+    gas: COVER_GAS.approve,
   });
 }
 
@@ -240,7 +256,9 @@ export async function coverQuote(warm, pair, need, { live = config.live } = {}) 
     };
   }
 
-  const minOut = slip(short, config.slippageBps);
+  // Require full shortfall fill — slipped minOut can land got ∈ [minOut, need)
+  // and abort after a successful swap, stranding quote with no curve buy.
+  const minOut = short;
   log(
     `[cover] need=${n} held=${before} short=${short} ethIn=${ethIn} live=${live ? 1 : 0}`,
   );
@@ -257,21 +275,42 @@ export async function coverQuote(warm, pair, need, { live = config.live } = {}) 
     };
   }
 
-  const got = await swapEthToQuote(warm, pair, ethIn, minOut, true);
-  const after = await balanceOf(pair, warm.state.address);
+  let totalEthIn = ethIn;
+  let got = await swapEthToQuote(warm, pair, ethIn, minOut, true);
+  let after = await balanceOf(pair, warm.state.address);
+
+  // One top-up if the pool still left us short (should be rare with minOut=short).
+  if (after < n) {
+    const still = n - after;
+    let moreEth = await ethForQuote(pair, still);
+    if (moreEth != null && moreEth > 0n) {
+      moreEth = (moreEth * 105n) / 100n;
+      const ethBal = await balanceOf(ZERO, warm.state.address);
+      const gasReserve = gasReserveFor("erc20_cover", warm.state.maxFeePerGas);
+      if (ethBal >= moreEth + gasReserve) {
+        log(`[cover] top-up short=${still} ethIn=${moreEth}`);
+        const got2 = await swapEthToQuote(warm, pair, moreEth, still, true);
+        totalEthIn += moreEth;
+        got += got2;
+        after = await balanceOf(pair, warm.state.address);
+      }
+    }
+  }
+
   if (after < n) {
     return {
       ok: false,
       reason: `cover_short after=${after} need=${n} got=${got}`,
       via: "eth",
-      ethIn,
+      ethIn: totalEthIn,
+      stranded: after,
     };
   }
   return {
     ok: true,
     via: before > 0n ? "mixed" : "eth",
     spend: n,
-    ethIn,
+    ethIn: totalEthIn,
     short,
     got,
     held: after,

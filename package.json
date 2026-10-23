@@ -1,6 +1,6 @@
 {
   "name": "ponssniper",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "private": true,
   "type": "module",
   "engines": {
@@ -9,6 +9,7 @@
   "scripts": {
     "keys": "node scripts/keys.mjs",
     "sniper": "node scripts/sniper.mjs",
+    "follow": "node scripts/follow.mjs",
     "watcher": "node scripts/watcher.mjs",
     "dash": "node scripts/dash.mjs",
     "observe": "node scripts/observe.mjs",

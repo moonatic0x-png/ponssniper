@@ -2,6 +2,25 @@
 
 All notable changes to this project are documented here.
 
+## [1.2.0] — 2026-10-23
+
+### Added
+
+- **Farmer-follow (piggyback)** module (`src/follow/`, `npm run follow`): watch ERC20 `Transfer` to known fee-farmers, gate, buy ≈ `$FOLLOW_BUY_USD` (default 0.8), hold forever / collect claims — no sell, no wash, no `$2` net-floor.
+- Independent live flag `FOLLOW_LIVE` (default 0); caps `FOLLOW_MAX_OPEN`, `FOLLOW_DAILY_USD`; `FOLLOW_FARMERS` + lookback env.
+- Positions `strategy` column (`snipe` | `follow`); dash Strategy label; actions `follow_detect` / `follow_skip` / `follow_buy_dry` / `follow_buy_sent`.
+- Unit tests for follow gates + USDG `$0.80` sizing plan.
+- Docs: README / AGENTS.md / `.env.example` for the second module.
+
+### Changed
+
+- `executeBuy` accepts optional `delayMs` (follow defaults to 0; sniper still uses `SNIPER_DELAY_MS`).
+- Snipe-tax `delayMs` now runs **before** ETH→quote cover (not after), so a failed buy cannot strand freshly swapped quote.
+
+### Fixed
+
+- Cover→buy abort could leave quote on the wallet with no `curve.buy`: router `minOut` used slipped shortfall (fill could be `< need` → `cover_short`), approve used `estimateGas`, and live `simulate_fail` aborted after funding. Now require full fill (+ one top-up), fixed-gas approve via the cover nonce path, and still send the buy after a live simulate miss.
+
 ## [1.1.0] — 2026-10-23
 
 ### Added

@@ -1,15 +1,10 @@
-import {
-  encodeFunctionData,
-  getAddress,
-  maxUint256,
-  parseEther,
-} from "viem";
-import { CurveAbi, Erc20Abi } from "../chain/abis.mjs";
+import { encodeFunctionData, getAddress, parseEther } from "viem";
+import { CurveAbi } from "../chain/abis.mjs";
 import { ZERO, lower } from "../chain/addresses.mjs";
 import { entryQuoteFor, buyTokensFor, slip } from "../chain/curveMath.mjs";
 import { publicClient, writeClient } from "../chain/clients.mjs";
 import { config, log } from "../config.mjs";
-import { coverQuote } from "./coverQuote.mjs";
+import { COVER_GAS, coverQuote, ensureAllowance } from "./coverQuote.mjs";
 
 /**
  * Pre-warmed account state for hot path.
@@ -85,6 +80,9 @@ export function planBuy({
 /**
  * Cover quote (ETH→pair if needed) then submit or DRY-simulate curve buy.
  * No sell path.
+ *
+ * Order: tax delay → cover → approve → buy (tight). Never swap then wait —
+ * a post-cover abort strands quote on the wallet.
  */
 export async function executeBuy({
   warm,
@@ -92,12 +90,19 @@ export async function executeBuy({
   pairToken,
   plan,
   live = config.live,
+  /** Override snipe-tax wait; follow uses 0 by default (dormant pots). */
+  delayMs = config.sniperDelayMs,
 }) {
   const client = publicClient();
   const me = warm.state.address;
   const curveAddr = getAddress(curve);
   const isEth = plan.isEth;
   const pair = isEth ? ZERO : getAddress(pairToken);
+
+  // 0) Wait out snipe-tax BEFORE spending ETH on cover
+  if (delayMs > 0) {
+    await new Promise((r) => setTimeout(r, delayMs));
+  }
 
   // 1) Automatic quote funding — balance or ETH→quote for the shortfall only
   const covered = await coverQuote(warm, pair, plan.quoteIn, { live });
@@ -110,33 +115,16 @@ export async function executeBuy({
       ` quoteNeeded=${plan.quoteIn}`,
   );
 
-  // 2) Approve curve to pull ERC20 quote
+  // 2) Approve curve to pull ERC20 quote (fixed gas; same nonce path as cover)
   if (!isEth) {
-    const allowance = await client.readContract({
-      address: pair,
-      abi: Erc20Abi,
-      functionName: "allowance",
-      args: [me, curveAddr],
-    });
-    if (allowance < plan.quoteIn) {
-      if (!live) {
-        log("[DRY] would approve", pair, "→", curveAddr);
-      } else {
-        const wc = writeClient(warm.state.account);
-        if (warm.state.nonce == null) await warm.refresh();
-        const nonce = warm.state.nonce;
-        const hash = await wc.writeContract({
-          address: pair,
-          abi: Erc20Abi,
-          functionName: "approve",
-          args: [curveAddr, maxUint256],
-          nonce,
-          maxFeePerGas: warm.state.maxFeePerGas,
-          maxPriorityFeePerGas: warm.state.maxPriorityFeePerGas,
-        });
-        warm.state.nonce = nonce + 1;
-        await client.waitForTransactionReceipt({ hash });
-      }
+    try {
+      await ensureAllowance(warm, pair, curveAddr, plan.quoteIn, live);
+    } catch (e) {
+      return {
+        ok: false,
+        reason: `approve_fail: ${e.shortMessage || e.message}`,
+        cover: covered,
+      };
     }
   }
 
@@ -146,12 +134,10 @@ export async function executeBuy({
     args: [plan.quoteIn, plan.minTokensOut, me],
   });
 
-  if (config.sniperDelayMs > 0) {
-    await new Promise((r) => setTimeout(r, config.sniperDelayMs));
-  }
-
   // 3) Simulate buy when we have (or will have) quote; in DRY after eth-cover,
   // eth_call may still fail if wallet lacks quote — log and treat as planned.
+  // After a live cover, never abort on simulate — send the buy (revert is cheaper
+  // than stranding quote from a false-negative eth_call).
   try {
     await client.call({
       account: me,
@@ -160,20 +146,22 @@ export async function executeBuy({
       value: isEth ? plan.quoteIn : 0n,
     });
   } catch (e) {
-    if (!live && covered.via !== "balance" && covered.via !== "eth_native") {
-      log(
-        `[DRY] buy simulate skipped/failed after planned cover: ${e.shortMessage || e.message}`,
-      );
-    } else if (!live && covered.dry) {
-      log(
-        `[DRY] buy simulate (pre-fund state): ${e.shortMessage || e.message}`,
-      );
+    const msg = e.shortMessage || e.message;
+    if (!live) {
+      if (covered.via !== "balance" && covered.via !== "eth_native") {
+        log(`[DRY] buy simulate skipped/failed after planned cover: ${msg}`);
+      } else if (covered.dry) {
+        log(`[DRY] buy simulate (pre-fund state): ${msg}`);
+      } else {
+        return {
+          ok: false,
+          reason: `simulate_fail: ${msg}`,
+          cover: covered,
+        };
+      }
     } else {
-      return {
-        ok: false,
-        reason: `simulate_fail: ${e.shortMessage || e.message}`,
-        cover: covered,
-      };
+      // Live: never abort after funding — eth_call false negatives strand quote.
+      log(`[buy] simulate failed — still sending: ${msg}`);
     }
   }
 
@@ -199,7 +187,7 @@ export async function executeBuy({
       nonce,
       maxFeePerGas: warm.state.maxFeePerGas,
       maxPriorityFeePerGas: warm.state.maxPriorityFeePerGas,
-      gas: 450_000n,
+      gas: COVER_GAS.buy,
     });
     warm.state.nonce = nonce + 1;
     return {

@@ -35,6 +35,7 @@ export function startDash({
           JSON.stringify({
             ...state,
             live: config.live,
+            followLive: config.followLive,
             readOnly: !!readOnly,
             wallet: wallet || null,
             heartbeat,

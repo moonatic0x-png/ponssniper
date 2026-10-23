@@ -74,6 +74,7 @@ async function refresh() {
       (p) =>
         `<tr>
           <td>${p.symbol || short(p.token)}</td>
+          <td>${p.strategy || "snipe"}</td>
           <td class="mono">${p.entry_epoch ?? "—"}</td>
           <td class="mono">${p.current_epoch ?? "—"}</td>
           <td class="${p.published ? "yes" : "no"}">${p.published ? "yes" : "no"}</td>

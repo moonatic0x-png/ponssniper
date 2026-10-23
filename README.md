@@ -1,31 +1,39 @@
-# PONS V2 Launch Sniper + Hold Dashboard
+# PONS V2 Launch Sniper + Farmer-Follow + Hold Dashboard
 
-Greenfield Node 22 ESM bot on **Robinhood Chain (4663)**. Listens for new Pons V2 launches, snipes **100k tokens** when holder-sharing is on and buyback is off, **never sells**, and shows holds / payouts / pot on a local dashboard.
+Greenfield Node 22 ESM bot on **Robinhood Chain (4663)**. Two entry strategies, one wallet, **never sells**:
 
-Stack: `viem` + built-in `node:sqlite`. Default is **DRY** (`SNIPER_LIVE=0`) — no `sendRawTransaction`.
+1. **Launch sniper** — new `TokenLaunched` → snipe **100k tokens** when sharing on / buyback off.
+2. **Farmer-follow (piggyback)** — watch known fee-farmers receive tokens, buy ≈ **$0.80** into the same curve pool, wait for their harvest → operator publish → `Claimed`.
+
+Stack: `viem` + built-in `node:sqlite`. Defaults are **DRY** (`SNIPER_LIVE=0`, `FOLLOW_LIVE=0`) — no `sendRawTransaction`.
 
 **Agent / operator runbook (clone → DRY → fund → live entry):** see [AGENTS.md](AGENTS.md).
 
 **Changelog:** [CHANGELOG.md](CHANGELOG.md).
 
-**Secrets:** never commit `.env` or `secrets/wallets.json`. Only `.env.example` and `secrets/.gitkeep` ship in git.
+**Secrets:** never commit `.env` or `secrets/wallets.json`. Only `.env.example` and `secrets/.gitkeep` ship in git. Do not import keys from other repos.
 
 ## Gates
 
-Buy only when:
+**Launch sniper** buys only when:
 
 1. `buybackEnabled === false`
 2. `creatorFeeRecipient` === the pool’s HolderDistributor (“sharing on”)
+
+**Farmer-follow** keeps those gates, plus: curve not graduated, farmer holds a non-dust bag, we have no position yet, `FOLLOW_MAX_OPEN` / `FOLLOW_DAILY_USD`. No `$2` net-floor / trigger / wash cost (farmer harvests).
 
 Optional: skip cbBTC / WETH quote pairs (`SKIP_INELIGIBLE_QUOTES=1`, default).
 
 ## Buy path
 
-Curves use `buy(quoteIn, minTokensOut, to)` (exact-in). We size a fixed token amount (`SNIPER_TOKENS`, default 100000 whole tokens × 10^decimals), compute `quoteIn` from reserves, and guard with `MAX_QUOTE_IN` / `DAILY_MAX_QUOTE` / `SLIPPAGE_BPS`.
+Curves use `buy(quoteIn, minTokensOut, to)` (exact-in).
+
+- **Sniper:** fixed token amount (`SNIPER_TOKENS`, default 100000) → `quoteIn` from reserves; `MAX_QUOTE_IN` / `DAILY_MAX_QUOTE` / `SLIPPAGE_BPS`.
+- **Follow:** USD notional (`FOLLOW_BUY_USD=0.8`) → quote units → tokens from curve math.
 
 **Quote funding:** wallet is ETH-primary. Before each buy, `coverQuote` uses existing pair balance or swaps only the shortfall ETH→`pairToken` through the router (native ETH pairs skip the swap).
 
-**Snipe tax:** on-chain tax starts ~99% (`snipeTaxStartBps`) and decays over ~3s. Default `SNIPER_DELAY_MS=3000` waits that window out so buys avoid snipe tax; set `0` only if you want max speed and accept the tax.
+**Snipe tax:** on-chain tax starts ~99% and decays over ~3s. Default `SNIPER_DELAY_MS=3000` for launches; follow defaults `FOLLOW_DELAY_MS=0` (dormant pots).
 
 ## Holder count (dashboard)
 
@@ -47,20 +55,23 @@ npm run keys
 # 4. DRY sniper (WSS listener + would-be buys)
 npm run sniper
 
+# 4b. DRY farmer-follow (Transfer→farmer + would-buy ~$0.80) — optional terminal
+npm run follow
+
 # 5. Watcher (epochs / Claimed / pot / holders / net worth) — separate terminal
 npm run watcher
 
 # 6. Dashboard http://127.0.0.1:42100
 npm run dash
 
-# Or all three:
+# Or sniper + watcher + dash (follow is separate):
 npm start
 
 # Tests
 npm test
 ```
 
-**Live buys:** set `SNIPER_LIVE=1` in `.env` only when you intend to spend. There is no sell module.
+**Live buys:** set `SNIPER_LIVE=1` and/or `FOLLOW_LIVE=1` only when you intend to spend. Flags are independent. There is no sell module. Avoid running both LIVE on the same wallet at once (nonce races).
 
 ## Hot-path latency
 
@@ -76,11 +87,12 @@ WSS: `RPC_WSS` (default `wss://robinhood.drpc.org`). Writes: official `RPC_HTTP`
 |--------|------|
 | `npm run keys` | Create `secrets/wallets.json` (0600) once |
 | `npm run sniper` | Factory WSS + gates + DRY/LIVE buy |
+| `npm run follow` | Farmer Transfer watch + ~$0.80 DRY/LIVE buy |
 | `npm run watcher` | Pot, holders, epochs, Claimed, net worth |
-| `npm run dash` | Local UI on `:42100` |
+| `npm run dash` | Local UI on `:42100` (strategy column on positions) |
 | `npm run observe` | Read-only: track `READ_ADDRESS` + dash (no key) |
 | `npm start` | sniper + watcher + dash (or observe+dash if `READ_ADDRESS`) |
-| `npm test` | Gate + curve math unit tests |
+| `npm test` | Gate + curve math + follow gate unit tests |
 
 **Remote dash:** set `READ_ADDRESS=0x…` in `.env` (safe to share with the sniper machine), then on the dash box run `npm run observe`. Sniper machine keeps using `npm run sniper` / `npm start` with its local key.
 

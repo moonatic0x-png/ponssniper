@@ -11,6 +11,15 @@ const SCHEMA = readFileSync(
 
 let _db;
 
+function migratePositions(_db) {
+  const cols = _db.prepare(`PRAGMA table_info(positions)`).all();
+  if (!cols.some((c) => c.name === "strategy")) {
+    _db.exec(
+      `ALTER TABLE positions ADD COLUMN strategy TEXT NOT NULL DEFAULT 'snipe'`,
+    );
+  }
+}
+
 export function openDb(path = config.dbPath) {
   if (_db) return _db;
   mkdirSync(dirname(path), { recursive: true });
@@ -18,6 +27,7 @@ export function openDb(path = config.dbPath) {
   _db.exec("PRAGMA journal_mode = WAL;");
   _db.exec("PRAGMA synchronous = NORMAL;");
   _db.exec(SCHEMA);
+  migratePositions(_db);
   return _db;
 }
 
@@ -61,8 +71,8 @@ export function upsertPool(row) {
 export function upsertPosition(row) {
   db()
     .prepare(
-      `INSERT INTO positions(token, entry_block, entry_epoch, tokens, quote_in, cost_usd, buy_tx, status, created_at)
-       VALUES(?,?,?,?,?,?,?,?,?)
+      `INSERT INTO positions(token, entry_block, entry_epoch, tokens, quote_in, cost_usd, buy_tx, status, strategy, created_at)
+       VALUES(?,?,?,?,?,?,?,?,?,?)
        ON CONFLICT(token) DO UPDATE SET
          entry_block=COALESCE(excluded.entry_block, positions.entry_block),
          entry_epoch=COALESCE(excluded.entry_epoch, positions.entry_epoch),
@@ -70,7 +80,8 @@ export function upsertPosition(row) {
          quote_in=excluded.quote_in,
          cost_usd=COALESCE(excluded.cost_usd, positions.cost_usd),
          buy_tx=COALESCE(excluded.buy_tx, positions.buy_tx),
-         status=excluded.status`,
+         status=excluded.status,
+         strategy=COALESCE(excluded.strategy, positions.strategy)`,
     )
     .run(
       row.token,
@@ -81,6 +92,7 @@ export function upsertPosition(row) {
       row.cost_usd ?? null,
       row.buy_tx ?? null,
       row.status ?? "open",
+      row.strategy ?? "snipe",
       row.created_at ?? now(),
     );
 }
@@ -220,6 +232,28 @@ export function sumDailyQuoteSpend(sinceMs) {
     }
   }
   return s;
+}
+
+/** Open + dry follow positions (idempotency / FOLLOW_MAX_OPEN). */
+export function countOpenFollows() {
+  const r = db()
+    .prepare(
+      `SELECT COUNT(*) AS n FROM positions
+       WHERE strategy = 'follow' AND status IN ('open','dry')`,
+    )
+    .get();
+  return Number(r?.n ?? 0);
+}
+
+/** Sum cost_usd for follow positions created since `sinceMs` (incl. dry). */
+export function sumDailyFollowUsd(sinceMs) {
+  const r = db()
+    .prepare(
+      `SELECT COALESCE(SUM(cost_usd), 0) AS u FROM positions
+       WHERE strategy = 'follow' AND created_at >= ?`,
+    )
+    .get(sinceMs);
+  return Number(r?.u ?? 0);
 }
 
 export function getState() {

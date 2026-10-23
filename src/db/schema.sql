@@ -21,6 +21,7 @@ CREATE TABLE IF NOT EXISTS positions (
   cost_usd REAL,
   buy_tx TEXT,
   status TEXT NOT NULL DEFAULT 'open',
+  strategy TEXT NOT NULL DEFAULT 'snipe',
   created_at INTEGER NOT NULL,
   FOREIGN KEY (token) REFERENCES pools(token)
 );

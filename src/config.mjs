@@ -53,6 +53,18 @@ const addr = (k) => {
   if (!isAddress(v)) throw new Error(`Invalid ${k}: ${v}`);
   return getAddress(v);
 };
+const addrList = (k) => {
+  const v = process.env[k];
+  if (v == null || v === "") return [];
+  return v
+    .split(/[,;\s]+/)
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .map((a) => {
+      if (!isAddress(a)) throw new Error(`Invalid address in ${k}: ${a}`);
+      return getAddress(a);
+    });
+};
 
 export const ROOT_DIR = ROOT;
 export const CHAIN_ID = 4663;
@@ -100,6 +112,25 @@ export const config = {
   walletsPath: resolve(ROOT, "secrets/wallets.json"),
   dashHost: process.env.DASH_HOST || "127.0.0.1",
   dashPort: num("DASH_PORT", 42100),
+
+  // --- Farmer-follow (piggyback) — independent of SNIPER_LIVE -----------------
+  /** 0 = DRY (default). Live curve buys only when FOLLOW_LIVE=1. */
+  followLive: bool("FOLLOW_LIVE", false),
+  /** Target quote notional in USD per pool (~$0.80). */
+  followBuyUsd: num("FOLLOW_BUY_USD", 0.8),
+  /** Cap concurrent open/dry follow positions. */
+  followMaxOpen: num("FOLLOW_MAX_OPEN", 40),
+  /** Cap USD spent on follows per UTC day (cost_usd sum). */
+  followDailyUsd: num("FOLLOW_DAILY_USD", 40),
+  /** Boot Transfer lookback (blocks ≈ 0.1s). Default 50k ≈ 1.4h. */
+  followLookbackBlocks: num("FOLLOW_LOOKBACK_BLOCKS", 50_000),
+  /** Wait before follow buy (ms). Default 0 — pots are usually past snipe tax. */
+  followDelayMs: num("FOLLOW_DELAY_MS", 0),
+  /**
+   * Extra farmer addresses (comma/space). Merged with built-in known set.
+   * Public addresses only — never import keys from other repos.
+   */
+  followFarmersExtra: addrList("FOLLOW_FARMERS"),
 };
 
 /** Redact private-key-shaped hex from log strings. */

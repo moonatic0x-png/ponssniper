@@ -5,6 +5,7 @@ import {
   gasReserveFor,
   quoteSpend,
 } from "../src/sniper/coverQuote.mjs";
+import { slip } from "../src/chain/curveMath.mjs";
 import { config } from "../src/config.mjs";
 
 describe("quoteSpend", () => {
@@ -18,6 +19,16 @@ describe("quoteSpend", () => {
 
   it("empty wallet", () => {
     assert.deepEqual(quoteSpend(0n, 50n), { spend: 0n, short: 50n });
+  });
+});
+
+describe("cover fill vs slippage", () => {
+  it("slipped minOut can be below need (legacy strand class)", () => {
+    const need = 10_000n;
+    const minOut = slip(need, 300);
+    assert.ok(minOut < need);
+    // A swap that fills exactly minOut would pass the router but fail after < need
+    assert.equal(minOut >= need, false);
   });
 });
 
