@@ -22,6 +22,7 @@ All notable changes to this project are documented here.
 - `executeBuy` always runs `coverQuote` before simulate/send (removed `ALLOW_QUOTE_SWAP` gate)
 - Sniper / action logs include `cover=` and optional `ethIn=`
 - README and AGENTS.md: fund wallet primarily in ETH; no manual pre-swap
+- Cover ETH preflight reserves `gasUnits × maxFeePerGas` (swap/approve/buy) with `GAS_RESERVE_WEI` as floor — avoids mid-sequence OOG when the 0.0001 ETH default alone was too small at 2 gwei
 
 ## [1.0.0] — 2026-10-23
 

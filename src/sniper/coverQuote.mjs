@@ -8,6 +8,37 @@ import { slip } from "../chain/curveMath.mjs";
 
 const deadline = () => BigInt(Math.floor(Date.now() / 1000) + 600);
 
+/** Matches createWarmAccount fee fallback in buy.mjs (2 gwei). */
+const FEE_FALLBACK_WEI = 2_000_000_000n;
+
+/** Conservative gas limits used on the live cover → approve → buy path. */
+export const COVER_GAS = {
+  swap: 350_000n,
+  approve: 80_000n,
+  buy: 450_000n,
+};
+
+/**
+ * Wei to reserve for gas so ethIn/value spend leaves room for remaining txs.
+ * Uses warm maxFeePerGas when set; else 2 gwei. Floor: config.gasReserveWei.
+ *
+ * @param {'eth_native'|'erc20_balance'|'erc20_cover'} kind
+ * @param {bigint|null|undefined} feePerGas
+ */
+export function gasReserveFor(kind, feePerGas) {
+  const fee =
+    feePerGas != null && feePerGas > 0n ? feePerGas : FEE_FALLBACK_WEI;
+  let units = COVER_GAS.buy;
+  if (kind === "erc20_cover") {
+    units += COVER_GAS.swap + COVER_GAS.approve;
+  } else if (kind === "erc20_balance") {
+    units += COVER_GAS.approve;
+  }
+  const computed = units * fee;
+  const floor = config.gasReserveWei;
+  return computed > floor ? computed : floor;
+}
+
 /** How much of `need` is already held, and how much is still short. */
 export function quoteSpend(held, need) {
   const h = held > 0n ? held : 0n;
@@ -166,11 +197,11 @@ export async function coverQuote(warm, pair, need, { live = config.live } = {}) 
 
   if (lower(pair) === ZERO || pair == null) {
     const ethBal = await balanceOf(ZERO, warm.state.address);
-    const gasReserve = config.gasReserveWei;
+    const gasReserve = gasReserveFor("eth_native", warm.state.maxFeePerGas);
     if (ethBal < n + gasReserve) {
       return {
         ok: false,
-        reason: `insufficient_eth bal=${ethBal} need=${n}+gas`,
+        reason: `insufficient_eth bal=${ethBal} need=${n} gasReserve=${gasReserve}`,
       };
     }
     return { ok: true, via: "eth_native", spend: n };
@@ -179,6 +210,14 @@ export async function coverQuote(warm, pair, need, { live = config.live } = {}) 
   const before = await balanceOf(pair, warm.state.address);
   const { short } = quoteSpend(before, n);
   if (short === 0n) {
+    const ethBal = await balanceOf(ZERO, warm.state.address);
+    const gasReserve = gasReserveFor("erc20_balance", warm.state.maxFeePerGas);
+    if (ethBal < gasReserve) {
+      return {
+        ok: false,
+        reason: `insufficient_eth_for_gas bal=${ethBal} gasReserve=${gasReserve}`,
+      };
+    }
     return { ok: true, via: "balance", spend: n, held: before };
   }
 
@@ -193,7 +232,7 @@ export async function coverQuote(warm, pair, need, { live = config.live } = {}) 
   ethIn = (ethIn * 103n) / 100n;
 
   const ethBal = await balanceOf(ZERO, warm.state.address);
-  const gasReserve = config.gasReserveWei;
+  const gasReserve = gasReserveFor("erc20_cover", warm.state.maxFeePerGas);
   if (ethBal < ethIn + gasReserve) {
     return {
       ok: false,

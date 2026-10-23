@@ -77,7 +77,8 @@ Fund the sniper address **primarily in ETH**. Before every buy the sniper auto-c
 3. Else if wallet already holds ≥ `quoteNeeded` of the pair → use balance.
 4. Else → swap **only the shortfall** ETH → pair via Uniswap router (`exactInput` / multicall), then approve + `curve.buy`.
 
-Keep enough ETH for: cover swap + `quoteNeeded` (ETH pairs) + `GAS_RESERVE_WEI` (default 0.0001 ETH).
+Keep enough ETH for: cover swap value + `quoteNeeded` (ETH pairs) + gas for swap/approve/buy
+(`max(GAS_RESERVE_WEI, gasUnits×fee)`; at the 2 gwei fallback, ERC20 cover needs ~0.00176 ETH gas).
 
 Suggested env caps in `.env` before live:
 
@@ -87,7 +88,7 @@ DAILY_MAX_QUOTE=<raw units/day>
 SLIPPAGE_BPS=300
 SNIPER_TOKENS=100000
 SNIPER_DELAY_MS=0                  # raise (e.g. 2500) to wait out ~99%→decay snipe tax (~3s)
-GAS_RESERVE_WEI=100000000000000    # 0.0001 ETH left for gas after cover
+GAS_RESERVE_WEI=100000000000000    # floor; preflight also sizes gas via fee×units
 SNIPER_LIVE=0                      # keep 0 until operator says go
 ```
 
