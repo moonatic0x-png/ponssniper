@@ -8,33 +8,46 @@ import { config } from "./config.mjs";
  * wallets.json shape: { sniper: { privateKey, address } }
  * Mode 0600. Created once by npm run keys; refuses overwrite.
  *
- * READ mode: when config.readAddress is set, returns address-only (no key).
+ * Prefers local keys when present so READ_ADDRESS in a shared .env does not
+ * disable sniper. Falls back to READ_ADDRESS (address-only) when no key file.
  */
 export function loadWallets(path = config.walletsPath) {
-  if (config.readOnly && config.readAddress) {
+  if (existsSync(path)) {
+    const j = JSON.parse(readFileSync(path, "utf8"));
+    if (!j.sniper?.privateKey) {
+      throw new Error("wallets.json missing sniper.privateKey");
+    }
+    const account = privateKeyToAccount(j.sniper.privateKey);
     return {
       sniper: {
-        privateKey: null,
-        address: getAddress(config.readAddress),
-        account: null,
-        readOnly: true,
+        privateKey: j.sniper.privateKey,
+        address: account.address,
+        account,
+        readOnly: false,
       },
     };
   }
-  if (!existsSync(path)) {
+  if (config.readAddress) {
+    return loadObserveWallet();
+  }
+  throw new Error(
+    `Missing ${path}. Run: npm run keys  (or set READ_ADDRESS for observe-only)`,
+  );
+}
+
+/** Address-only wallet for npm run observe (ignores local keys). */
+export function loadObserveWallet() {
+  if (!config.readAddress) {
     throw new Error(
-      `Missing ${path}. Run: npm run keys  (or set READ_ADDRESS for observe-only)`,
+      "Set READ_ADDRESS=0x… in .env to observe a remote sniper (no private key).",
     );
   }
-  const j = JSON.parse(readFileSync(path, "utf8"));
-  if (!j.sniper?.privateKey) throw new Error("wallets.json missing sniper.privateKey");
-  const account = privateKeyToAccount(j.sniper.privateKey);
   return {
     sniper: {
-      privateKey: j.sniper.privateKey,
-      address: account.address,
-      account,
-      readOnly: false,
+      privateKey: null,
+      address: getAddress(config.readAddress),
+      account: null,
+      readOnly: true,
     },
   };
 }
@@ -59,9 +72,12 @@ export function createWalletsOnce(path = config.walletsPath) {
 }
 
 export function showAddresses(path = config.walletsPath) {
-  if (config.readOnly && config.readAddress) {
+  if (existsSync(path)) {
+    const w = loadWallets(path);
+    return { sniper: w.sniper.address };
+  }
+  if (config.readAddress) {
     return { sniper: getAddress(config.readAddress), readOnly: true };
   }
-  const w = loadWallets(path);
-  return { sniper: w.sniper.address };
+  throw new Error(`Missing ${path}. Run: npm run keys`);
 }

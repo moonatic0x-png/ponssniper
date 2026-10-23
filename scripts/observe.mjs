@@ -1,23 +1,18 @@
 #!/usr/bin/env node
 /**
- * Read-only dash: watch a remote sniper address (READ_ADDRESS) — no keys, no buys.
+ * Read-only dash: watch READ_ADDRESS (remote sniper) — no buys.
+ * Safe alongside a sniper machine that shares the same .env; this script
+ * always uses READ_ADDRESS and never starts the hot path.
  */
 import { openDb } from "../src/db/db.mjs";
-import { loadWallets } from "../src/keys.mjs";
+import { loadObserveWallet } from "../src/keys.mjs";
 import { config, log } from "../src/config.mjs";
 import { startWatcher } from "../src/watcher/index.mjs";
 import { startDash } from "../src/dash/server.mjs";
 
-if (!config.readOnly) {
-  console.error(
-    "Set READ_ADDRESS=0x… in .env to run observe mode (no private key needed).",
-  );
-  process.exit(1);
-}
-
+const wallets = loadObserveWallet();
 openDb();
-const wallets = loadWallets();
 log(`[observe] wallet=${wallets.sniper.address} dash=:${config.dashPort}`);
-startDash(); // up during backfill
-await startWatcher(wallets);
+startDash({ readOnly: true, wallet: wallets.sniper.address });
+await startWatcher(wallets, { observe: true });
 await new Promise(() => {});

@@ -14,7 +14,12 @@ const MIME = {
   ".svg": "image/svg+xml",
 };
 
-export function startDash({ host = config.dashHost, port = config.dashPort } = {}) {
+export function startDash({
+  host = config.dashHost,
+  port = config.dashPort,
+  readOnly = false,
+  wallet = config.readAddress || null,
+} = {}) {
   openDb();
   const server = createServer((req, res) => {
     try {
@@ -30,8 +35,8 @@ export function startDash({ host = config.dashHost, port = config.dashPort } = {
           JSON.stringify({
             ...state,
             live: config.live,
-            readOnly: config.readOnly,
-            wallet: config.readAddress || null,
+            readOnly: !!readOnly,
+            wallet: wallet || null,
             heartbeat,
             ts: Date.now(),
           }),

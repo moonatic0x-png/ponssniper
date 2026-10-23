@@ -126,21 +126,27 @@ If `buy_fail` / `simulate_fail` / `insufficient_quote` / `insufficient_eth`: fix
 
 ## Phase G — Read-only dash (remote sniper)
 
-Watch another machine’s sniper **without** copying keys. On this machine:
+Same repo / shared `.env` on two machines is fine. `READ_ADDRESS` does **not** turn off sniping when `secrets/wallets.json` is present.
+
+| Machine | Has key? | Run |
+|---------|----------|-----|
+| Sniper | `secrets/wallets.json` | `npm run sniper` (or `npm start`) — buys as usual |
+| Dash | no key needed | `npm run observe` — tracks `READ_ADDRESS` |
 
 ```bash
-# .env
+# .env (can be identical on both machines)
 READ_ADDRESS=0xYourSniperAddress
-DB_PATH=data/pons-read.db          # optional: keep separate from a local sniper DB
-# READ_LOOKBACK_BLOCKS=1000000     # first sync window (~28h at ~0.1s blocks)
+# On the dash machine only, optional separate DB:
+# DB_PATH=data/pons-read.db
+# READ_LOOKBACK_BLOCKS=1000000
 
-npm run observe                    # watcher (chain backfill + follow) + dash
+# Dash machine:
+npm run observe
 # open http://127.0.0.1:42100 — badge shows READ + wallet
 ```
 
-- No `secrets/wallets.json` required. `npm run sniper` refuses to start when `READ_ADDRESS` is set.
-- `npm start` with `READ_ADDRESS` skips the hot path (observe + dash only).
-- Observer scans `CurveBuy` for that address into local SQLite; then pot/claims/net worth work like the normal watcher.
+- Observer backfills launches + per-curve `CurveBuy` / balances into local SQLite; then pot/claims/net worth work like the normal watcher.
+- `npm start` without a key file falls back to observe mode; with a key file it always starts the hot path.
 
 ## Commands cheat sheet
 

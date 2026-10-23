@@ -58,15 +58,16 @@ export const ROOT_DIR = ROOT;
 export const CHAIN_ID = 4663;
 export const BLOCK_TIME_S = 0.1008;
 
-/** Observe-only wallet (no private key). Set READ_ADDRESS to enable. */
+/**
+ * Optional remote sniper address for `npm run observe`.
+ * Safe in a shared .env: does NOT disable sniper when secrets/wallets.json exists.
+ */
 const readAddress = addr("READ_ADDRESS");
 
 export const config = {
   live: bool("SNIPER_LIVE", false),
-  /** True when READ_ADDRESS is set — watcher+dash only, no buys. */
-  readOnly: readAddress != null,
   readAddress,
-  /** How far back to scan CurveBuy / launches on observe start (~0.1s blocks). */
+  /** How far back to scan launches/buys on observe start (~0.1s blocks). */
   readLookbackBlocks: num("READ_LOOKBACK_BLOCKS", 1_000_000),
   rpcHttp: process.env.RPC_HTTP || "https://rpc.mainnet.chain.robinhood.com",
   rpcWss: process.env.RPC_WSS || "wss://robinhood.drpc.org",

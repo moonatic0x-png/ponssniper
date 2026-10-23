@@ -1,4 +1,4 @@
-import { decodeEventLog, getAddress, pad } from "viem";
+import { decodeEventLog, getAddress } from "viem";
 import {
   CurveAbi,
   DistributorFactoryAbi,
@@ -14,6 +14,7 @@ import {
   lower,
 } from "../chain/addresses.mjs";
 import { publicClient } from "../chain/clients.mjs";
+import { ethUsdMark } from "../chain/price.mjs";
 import { config, log } from "../config.mjs";
 import {
   db,
@@ -23,14 +24,11 @@ import {
   upsertPool,
   upsertPosition,
 } from "../db/db.mjs";
-import { ethUsdMark } from "../chain/price.mjs";
 
+/** Factory log chunks — keep under free-RPC range caps. */
 const CHUNK = 2_000n;
 const CURSOR = "observe_head";
-
-function topicAddr(a) {
-  return pad(getAddress(a), { size: 32 });
-}
+const curveBuyEvent = CurveAbi.find((x) => x.name === "CurveBuy");
 
 function costUsdFor(pair, quoteIn, ethPx) {
   const p = lower(pair) || ZERO;
@@ -43,7 +41,7 @@ function costUsdFor(pair, quoteIn, ethPx) {
   return null;
 }
 
-async function fetchMeta(token, curve) {
+async function fetchMeta(token, curveHint) {
   const client = publicClient();
   const tokenA = getAddress(token);
   let info = null;
@@ -80,7 +78,7 @@ async function fetchMeta(token, curve) {
     /* */
   }
   return {
-    curve: curve || (info?.curve ? lower(info.curve) : null),
+    curve: curveHint || (info?.curve ? lower(info.curve) : null),
     pair: info?.pairToken != null ? lower(info.pairToken) : null,
     symbol,
     decimals,
@@ -92,68 +90,87 @@ async function fetchMeta(token, curve) {
   };
 }
 
-async function resolveTokenFromBuy(lg, me) {
+/**
+ * Sum CurveBuy for wallet on a single curve (address-scoped — RPC requires this).
+ */
+async function buysOnCurve(curve, wallet, fromBlock, toBlock) {
   const client = publicClient();
-  try {
-    const receipt = await client.getTransactionReceipt({
-      hash: lg.transactionHash,
-    });
-    for (const l of receipt.logs) {
-      if (l.topics?.[0] !== TOPICS.Transfer) continue;
-      if (l.topics.length < 3) continue;
-      const to = lower("0x" + l.topics[2].slice(26));
-      if (to !== me) continue;
-      return lower(l.address);
+  const curveA = getAddress(curve);
+  const me = getAddress(wallet);
+  const [asBuyer, asRecipient] = await Promise.all([
+    client.getLogs({
+      address: curveA,
+      event: curveBuyEvent,
+      args: { buyer: me },
+      fromBlock,
+      toBlock,
+    }),
+    client.getLogs({
+      address: curveA,
+      event: curveBuyEvent,
+      args: { recipient: me },
+      fromBlock,
+      toBlock,
+    }),
+  ]);
+  const seen = new Set();
+  let quoteIn = 0n;
+  let tokens = 0n;
+  let buyTx = null;
+  let entryBlock = null;
+  for (const lg of [...asBuyer, ...asRecipient]) {
+    const key = `${lg.transactionHash}:${lg.logIndex}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    let decoded;
+    try {
+      decoded = decodeEventLog({
+        abi: CurveAbi,
+        data: lg.data,
+        topics: lg.topics,
+      });
+    } catch {
+      continue;
     }
-  } catch {
-    /* */
+    quoteIn += decoded.args.quoteIn;
+    tokens += decoded.args.tokensOut;
+    if (!buyTx) {
+      buyTx = lg.transactionHash;
+      entryBlock =
+        lg.blockNumber != null ? Number(lg.blockNumber) : null;
+    }
   }
-  return null;
+  return { quoteIn, tokens, buyTx, entryBlock, n: seen.size };
 }
 
 /**
- * Scan [from,to] for launches, distributors, and CurveBuy by wallet.
- * Upserts pools + open positions for observed buys.
+ * Scan factory launches in [from,to], then for each pool check wallet balance /
+ * CurveBuy (per-curve). Upserts open positions.
  */
 export async function scanObserveRange(wallet, fromBlock, toBlock) {
   const client = publicClient();
-  const me = lower(wallet);
-  const meTopic = topicAddr(wallet);
-  const curveToToken = new Map();
-  const tokenMeta = new Map(); // token -> {curve, pair, launch_block, launch_tx}
+  const me = getAddress(wallet);
+  const pools = new Map(); // token -> {curve, pair, launch_block, launch_tx}
   const distributors = new Map();
-  const buys = new Map(); // token -> aggregated buy
 
   let from = BigInt(fromBlock);
   const end = BigInt(toBlock);
   while (from <= end) {
     const to = from + CHUNK - 1n > end ? end : from + CHUNK - 1n;
-
-    const [launchLogs, distLogs, buyAsBuyer, buyAsRecipient] =
-      await Promise.all([
-        client.getLogs({
-          address: getAddress(LAUNCH),
-          fromBlock: from,
-          toBlock: to,
-          topics: [TOPICS.TokenLaunched],
-        }),
-        client.getLogs({
-          address: getAddress(DIST_FACTORY),
-          fromBlock: from,
-          toBlock: to,
-          topics: [TOPICS.DistributorCreated],
-        }),
-        client.getLogs({
-          fromBlock: from,
-          toBlock: to,
-          topics: [TOPICS.CurveBuy, meTopic],
-        }),
-        client.getLogs({
-          fromBlock: from,
-          toBlock: to,
-          topics: [TOPICS.CurveBuy, null, meTopic],
-        }),
-      ]);
+    const [launchLogs, distLogs] = await Promise.all([
+      client.getLogs({
+        address: getAddress(LAUNCH),
+        fromBlock: from,
+        toBlock: to,
+        topics: [TOPICS.TokenLaunched],
+      }),
+      client.getLogs({
+        address: getAddress(DIST_FACTORY),
+        fromBlock: from,
+        toBlock: to,
+        topics: [TOPICS.DistributorCreated],
+      }),
+    ]);
 
     for (const lg of launchLogs) {
       try {
@@ -163,10 +180,8 @@ export async function scanObserveRange(wallet, fromBlock, toBlock) {
           topics: lg.topics,
         });
         const token = lower(args.token);
-        const curve = lower(args.curve);
-        curveToToken.set(curve, token);
-        tokenMeta.set(token, {
-          curve,
+        pools.set(token, {
+          curve: lower(args.curve),
           pair: lower(args.pairToken),
           launch_block:
             lg.blockNumber != null ? Number(lg.blockNumber) : null,
@@ -176,7 +191,6 @@ export async function scanObserveRange(wallet, fromBlock, toBlock) {
         /* */
       }
     }
-
     for (const lg of distLogs) {
       try {
         const { args } = decodeEventLog({
@@ -189,103 +203,97 @@ export async function scanObserveRange(wallet, fromBlock, toBlock) {
         /* */
       }
     }
-
-    const seen = new Set();
-    for (const lg of [...buyAsBuyer, ...buyAsRecipient]) {
-      const key = `${lg.transactionHash}:${lg.logIndex}`;
-      if (seen.has(key)) continue;
-      seen.add(key);
-      let decoded;
-      try {
-        decoded = decodeEventLog({
-          abi: CurveAbi,
-          data: lg.data,
-          topics: lg.topics,
-        });
-      } catch {
-        continue;
-      }
-      const buyer = lower(decoded.args.buyer);
-      const recipient = lower(decoded.args.recipient);
-      if (buyer !== me && recipient !== me) continue;
-
-      const curve = lower(lg.address);
-      let token = curveToToken.get(curve);
-      if (!token) {
-        token = await resolveTokenFromBuy(lg, me);
-        if (token) curveToToken.set(curve, token);
-      }
-      if (!token) {
-        log("[observe] CurveBuy unknown token curve=", curve.slice(0, 12));
-        continue;
-      }
-
-      const prev = buys.get(token);
-      const quoteIn = decoded.args.quoteIn;
-      const tokensOut = decoded.args.tokensOut;
-      if (!prev) {
-        buys.set(token, {
-          token,
-          curve,
-          quote_in: quoteIn,
-          tokens: tokensOut,
-          buy_tx: lg.transactionHash,
-          entry_block:
-            lg.blockNumber != null ? Number(lg.blockNumber) : null,
-        });
-      } else {
-        prev.quote_in += quoteIn;
-        prev.tokens += tokensOut;
-      }
-    }
-
     from = to + 1n;
   }
 
+  // Also re-check pools already in DB (launched before this window)
+  for (const row of db()
+    .prepare(`SELECT token, curve, pair, launch_block, launch_tx FROM pools`)
+    .all()) {
+    if (!pools.has(row.token) && row.curve) {
+      pools.set(row.token, {
+        curve: lower(row.curve),
+        pair: row.pair ? lower(row.pair) : null,
+        launch_block: row.launch_block,
+        launch_tx: row.launch_tx,
+      });
+    }
+  }
+
   const ethPx = await ethUsdMark().catch(() => null);
+  const fromB = BigInt(fromBlock);
+  const toB = BigInt(toBlock);
   let n = 0;
-  for (const buy of buys.values()) {
-    const base = tokenMeta.get(buy.token) || {};
-    const meta = await fetchMeta(buy.token, buy.curve || base.curve);
+
+  for (const [token, base] of pools) {
+    if (!base.curve) continue;
+    let bal = 0n;
+    try {
+      bal = await client.readContract({
+        address: getAddress(token),
+        abi: Erc20Abi,
+        functionName: "balanceOf",
+        args: [me],
+      });
+    } catch {
+      continue;
+    }
+
+    const buy = await buysOnCurve(base.curve, me, fromB, toB).catch(() => ({
+      quoteIn: 0n,
+      tokens: 0n,
+      buyTx: null,
+      entryBlock: null,
+      n: 0,
+    }));
+
+    if (bal <= 0n && buy.n === 0) continue;
+
+    const meta = await fetchMeta(token, base.curve);
     const dist =
-      distributors.get(buy.token) || meta.creatorFeeRecipient || null;
+      distributors.get(token) || meta.creatorFeeRecipient || null;
 
     upsertPool({
-      token: buy.token,
-      curve: meta.curve || buy.curve,
+      token,
+      curve: meta.curve || base.curve,
       distributor: dist,
       pair: meta.pair ?? base.pair,
       symbol: meta.symbol,
       decimals: meta.decimals,
       buyback: meta.buyback,
       tax_bps: meta.tax_bps,
-      launch_block: base.launch_block ?? buy.entry_block,
-      launch_tx: base.launch_tx ?? buy.buy_tx,
+      launch_block: base.launch_block,
+      launch_tx: base.launch_tx,
     });
 
-    const cost_usd = costUsdFor(meta.pair ?? base.pair, buy.quote_in, ethPx);
+    const tokens = bal > 0n ? bal : buy.tokens;
+    const quoteIn = buy.quoteIn > 0n ? buy.quoteIn : 0n;
+    const cost_usd = costUsdFor(meta.pair ?? base.pair, quoteIn, ethPx);
     const prev = db()
-      .prepare(`SELECT buy_tx, entry_epoch FROM positions WHERE token=?`)
-      .get(buy.token);
+      .prepare(`SELECT buy_tx, entry_epoch, quote_in FROM positions WHERE token=?`)
+      .get(token);
+
     upsertPosition({
-      token: buy.token,
-      entry_block: buy.entry_block,
-      // Unknown at observe time; keep prior if any. Dash uses current_epoch > 0 for Published.
+      token,
+      entry_block: buy.entryBlock ?? base.launch_block,
       entry_epoch: prev?.entry_epoch ?? 0,
-      tokens: buy.tokens,
-      quote_in: buy.quote_in,
+      tokens,
+      quote_in: quoteIn > 0n ? quoteIn : (prev?.quote_in ?? 0n),
       cost_usd,
-      buy_tx: buy.buy_tx,
+      buy_tx: buy.buyTx ?? prev?.buy_tx ?? null,
       status: "open",
     });
-    if (!prev || prev.buy_tx !== buy.buy_tx) {
+
+    if (!prev || (buy.buyTx && prev.buy_tx !== buy.buyTx)) {
       insertAction({
         kind: "observe",
-        token: buy.token,
-        detail: `buy_tx=${buy.buy_tx} quote=${buy.quote_in}`,
+        token,
+        detail:
+          (buy.buyTx ? `buy_tx=${buy.buyTx} ` : "balance ") +
+          `quote=${quoteIn} bal=${bal}`,
       });
       log(
-        `[observe] position ${meta.symbol || buy.token.slice(0, 10)} quote=${buy.quote_in} tokens=${buy.tokens}`,
+        `[observe] position ${meta.symbol || token.slice(0, 10)} bal=${bal} quote=${quoteIn}`,
       );
     }
     n += 1;
@@ -312,7 +320,7 @@ export async function startObserve(wallet) {
       `[observe] sync wallet=${wallet} blocks ${from}→${head} lookback=${config.readLookbackBlocks}`,
     );
     const n = await scanObserveRange(wallet, from, head);
-    log(`[observe] synced ${n} buy(s)`);
+    log(`[observe] synced ${n} position(s)`);
   }
   setCursor(CURSOR, String(head));
 
@@ -321,10 +329,12 @@ export async function startObserve(wallet) {
       const cur = getCursor(CURSOR);
       const start = cur != null ? BigInt(cur) + 1n : head + 1n;
       const tip = await client.getBlockNumber();
-      if (start > tip) return;
-      const n = await scanObserveRange(wallet, start, tip);
+      // Overlap a bit so we don't miss; always re-check known pools' balances.
+      const fromTick = start > 50n ? start - 50n : start;
+      if (fromTick > tip) return;
+      const n = await scanObserveRange(wallet, fromTick, tip);
       setCursor(CURSOR, String(tip));
-      if (n > 0) log(`[observe] +${n} new buy(s) @${tip}`);
+      if (n > 0) log(`[observe] tick positions=${n} @${tip}`);
     } catch (e) {
       log("[observe] tick err", e.message);
     }

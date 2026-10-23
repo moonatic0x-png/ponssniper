@@ -78,8 +78,11 @@ WSS: `RPC_WSS` (default `wss://robinhood.drpc.org`). Writes: official `RPC_HTTP`
 | `npm run sniper` | Factory WSS + gates + DRY/LIVE buy |
 | `npm run watcher` | Pot, holders, epochs, Claimed, net worth |
 | `npm run dash` | Local UI on `:42100` |
-| `npm start` | sniper + watcher + dash |
+| `npm run observe` | Read-only: track `READ_ADDRESS` + dash (no key) |
+| `npm start` | sniper + watcher + dash (or observe+dash if `READ_ADDRESS`) |
 | `npm test` | Gate + curve math unit tests |
+
+**Remote dash:** set `READ_ADDRESS=0x…` in `.env` (safe to share with the sniper machine), then on the dash box run `npm run observe`. Sniper machine keeps using `npm run sniper` / `npm start` with its local key.
 
 ## Safety
 

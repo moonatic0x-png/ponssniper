@@ -161,12 +161,16 @@ async function handleDistLog(lg, row, me) {
 /**
  * Watch epochs/claims via WSS on held distributors; refresh pot/holders; net worth.
  * No sell. Claims: watch Claimed for our wallet only (no claim executor).
- * READ mode: also backfill/follow CurveBuy for config.readAddress into local DB.
+ *
+ * @param {{ observe?: boolean }} [opts] — when true (or address-only wallet),
+ *   backfill/follow chain buys into local DB. Sniper machines leave this off;
+ *   they journal positions themselves.
  */
-export async function startWatcher(wallets) {
+export async function startWatcher(wallets, opts = {}) {
   const wallet = wallets.sniper.address;
+  const doObserve = opts.observe === true || wallets.sniper.readOnly === true;
   let observe = null;
-  if (config.readOnly) {
+  if (doObserve) {
     observe = await startObserve(wallet);
   }
   let unwatch = null;
@@ -238,7 +242,7 @@ export async function startWatcher(wallets) {
 
   log(
     `[watcher] started wallet=${wallet}` +
-      (config.readOnly ? " mode=READ" : ""),
+      (doObserve ? " mode=READ" : ""),
   );
 
   return {
