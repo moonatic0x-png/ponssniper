@@ -13,12 +13,11 @@ import {
   ZERO,
   lower,
 } from "../chain/addresses.mjs";
-import { publicClient } from "../chain/clients.mjs";
+import { publicClient, wssClient } from "../chain/clients.mjs";
 import { ethUsdMark } from "../chain/price.mjs";
 import { config, log } from "../config.mjs";
 import {
   db,
-  getCursor,
   insertAction,
   setCursor,
   upsertPool,
@@ -193,22 +192,40 @@ async function buysOnCurve(curve, wallet, fromBlock, toBlock) {
 }
 
 /**
- * Scan factory launches in [from,to], then for each pool check wallet balance /
- * CurveBuy (per-curve). Upserts open positions.
+ * Max launches to balance-check from a scan window (most recent first).
+ * Wide windows used to skip ALL launch candidates and only re-check DB rows,
+ * so new bags (e.g. buy 30k blocks ago) never appeared when Blockscout 403'd.
  */
-export async function scanObserveRange(wallet, fromBlock, toBlock) {
-  const client = publicClient();
-  const me = getAddress(wallet);
-  const pools = new Map(); // token -> {curve, pair, launch_block, launch_tx}
-  const distributors = new Map();
+const MAX_LAUNCH_BALANCE_CHECKS = 400;
 
-  let from = BigInt(fromBlock);
-  const end = BigInt(toBlock);
-  const span = end >= from ? end - from + 1n : 0n;
+/**
+ * Find held Pons bags in [from,to] and upsert positions.
+ *
+ * Wide lookbacks only index factory launches for metadata and balance-check
+ * DB/explorer candidates. Short ticks also balance-check launches in-window
+ * (few dozen) so new snipes appear without starving pot refresh.
+ *
+ * @param {{ explorer?: boolean }} [opts]
+ */
+export async function scanObserveRange(wallet, fromBlock, toBlock, opts = {}) {
+  const me = getAddress(wallet);
+  const launchMeta = new Map(); // token -> {curve, pair, launch_block, launch_tx}
+  const distributors = new Map();
+  const candidates = new Map(); // token -> base meta (may be sparse)
+  const client = publicClient();
+  const useExplorer = opts.explorer !== false;
+
+  const fromB = BigInt(fromBlock);
+  const toB = BigInt(toBlock);
+  const span = toB >= fromB ? toB - fromB + 1n : 0n;
+  /** Newest launches first for capped balance-checks. */
+  const launchOrder = [];
+
+  let from = fromB;
   let chunksDone = 0;
   const chunksTotal = span === 0n ? 0 : Number((span + CHUNK - 1n) / CHUNK);
-  while (from <= end) {
-    const to = from + CHUNK - 1n > end ? end : from + CHUNK - 1n;
+  while (from <= toB) {
+    const to = from + CHUNK - 1n > toB ? toB : from + CHUNK - 1n;
     chunksDone += 1;
     if (chunksTotal > 20 && chunksDone % 25 === 0) {
       log(`[observe] launch scan ${chunksDone}/${chunksTotal} →${to}`);
@@ -236,13 +253,15 @@ export async function scanObserveRange(wallet, fromBlock, toBlock) {
           topics: lg.topics,
         });
         const token = lower(args.token);
-        pools.set(token, {
+        const base = {
           curve: lower(args.curve),
           pair: lower(args.pairToken),
           launch_block:
             lg.blockNumber != null ? Number(lg.blockNumber) : null,
           launch_tx: lg.transactionHash,
-        });
+        };
+        launchMeta.set(token, base);
+        launchOrder.push(token);
       } catch {
         /* */
       }
@@ -262,156 +281,301 @@ export async function scanObserveRange(wallet, fromBlock, toBlock) {
     from = to + 1n;
   }
 
-  // Also re-check pools already in DB (launched before this window)
+  // Newest launches first; cap balanceOf fan-out on huge windows.
+  const launchSlice = launchOrder.slice(-MAX_LAUNCH_BALANCE_CHECKS);
+  for (const token of launchSlice) {
+    candidates.set(token, launchMeta.get(token));
+  }
+  if (launchOrder.length > MAX_LAUNCH_BALANCE_CHECKS) {
+    log(
+      `[observe] launch candidates capped ${MAX_LAUNCH_BALANCE_CHECKS}/${launchOrder.length}`,
+    );
+  }
+
+  // Always re-check pools / positions already in DB
   for (const row of db()
     .prepare(`SELECT token, curve, pair, launch_block, launch_tx FROM pools`)
     .all()) {
-    if (!pools.has(row.token) && row.curve) {
-      pools.set(row.token, {
-        curve: lower(row.curve),
-        pair: row.pair ? lower(row.pair) : null,
-        launch_block: row.launch_block,
-        launch_tx: row.launch_tx,
-      });
-    }
+    const base = launchMeta.get(row.token) || {
+      curve: row.curve ? lower(row.curve) : null,
+      pair: row.pair ? lower(row.pair) : null,
+      launch_block: row.launch_block,
+      launch_tx: row.launch_tx,
+    };
+    candidates.set(row.token, base);
   }
 
-  // Explorer-held tokens: catches follow bags launched outside the lookback window.
-  for (const token of await fetchHeldTokenAddresses(me).catch(() => [])) {
-    if (pools.has(token)) continue;
-    const meta = await fetchMeta(token, null);
-    if (!meta.curve) continue;
-    pools.set(token, {
-      curve: meta.curve,
-      pair: meta.pair,
-      launch_block: null,
-      launch_tx: null,
-    });
+  // Explorer-held tokens (when API key / Cloudflare allows) — skip on fast ticks
+  if (useExplorer) {
+    for (const token of await fetchHeldTokenAddresses(me).catch(() => [])) {
+      if (candidates.has(token)) continue;
+      candidates.set(token, launchMeta.get(token) || {
+        curve: null,
+        pair: null,
+        launch_block: null,
+        launch_tx: null,
+      });
+    }
   }
 
   const ethPx = await ethUsdMark().catch(() => null);
-  const fromB = BigInt(fromBlock);
-  const toB = BigInt(toBlock);
   let n = 0;
+  const buyFrom =
+    toB > 50_000n && span > 50_000n ? toB - 50_000n : fromB;
 
-  // Balance-first: only pull CurveBuy history for tokens the wallet still holds.
-  // (Per-curve getLogs over the full lookback for every launch is too heavy.)
-  for (const [token, base] of pools) {
-    if (!base.curve) continue;
-    let bal = 0n;
-    try {
-      bal = await client.readContract({
-        address: getAddress(token),
-        abi: Erc20Abi,
-        functionName: "balanceOf",
-        args: [me],
-      });
-    } catch {
-      continue;
-    }
-    if (bal <= 0n) continue;
-
-    const buy = await buysOnCurve(base.curve, me, fromB, toB).catch(() => ({
-      quoteIn: 0n,
-      tokens: 0n,
-      buyTx: null,
-      entryBlock: null,
-      n: 0,
-    }));
-
-    const meta = await fetchMeta(token, base.curve);
-    const dist =
-      distributors.get(token) || meta.creatorFeeRecipient || null;
-
-    upsertPool({
-      token,
-      curve: meta.curve || base.curve,
-      distributor: dist,
-      pair: meta.pair ?? base.pair,
-      symbol: meta.symbol,
-      decimals: meta.decimals,
-      buyback: meta.buyback,
-      tax_bps: meta.tax_bps,
-      launch_block: base.launch_block,
-      launch_tx: base.launch_tx,
+  for (const [token, base0] of candidates) {
+    if (KNOWN_QUOTES[token]) continue;
+    const base = launchMeta.get(token) || base0;
+    const hit = await upsertHeldIfAny(wallet, token, {
+      ...base,
+      distributor: distributors.get(token) || null,
+      ethPx,
+      buyFrom,
+      buyTo: toB,
     });
-
-    const tokens = bal;
-    const quoteIn = buy.quoteIn > 0n ? buy.quoteIn : 0n;
-    const cost_usd = costUsdFor(meta.pair ?? base.pair, quoteIn, ethPx);
-    const prev = db()
-      .prepare(`SELECT buy_tx, entry_epoch, quote_in FROM positions WHERE token=?`)
-      .get(token);
-
-    upsertPosition({
-      token,
-      entry_block: buy.entryBlock ?? base.launch_block,
-      entry_epoch: prev?.entry_epoch ?? 0,
-      tokens,
-      quote_in: quoteIn > 0n ? quoteIn : (prev?.quote_in ?? 0n),
-      cost_usd,
-      buy_tx: buy.buyTx ?? prev?.buy_tx ?? null,
-      status: "open",
-    });
-
-    if (!prev || (buy.buyTx && prev.buy_tx !== buy.buyTx)) {
-      insertAction({
-        kind: "observe",
-        token,
-        detail:
-          (buy.buyTx ? `buy_tx=${buy.buyTx} ` : "balance ") +
-          `quote=${quoteIn} bal=${bal}`,
-      });
-      log(
-        `[observe] position ${meta.symbol || token.slice(0, 10)} bal=${bal} quote=${quoteIn}`,
-      );
-    }
-    n += 1;
+    if (hit) n += 1;
   }
   return n;
 }
 
 /**
- * Backfill lookback on every start (cursor must not skip that), then tick with a
- * wide launch re-check window so buys on slightly-older pools still appear.
+ * Balance-check one token and upsert position if the READ wallet still holds it.
+ * @returns {Promise<boolean>} true if a position row was written
+ */
+export async function upsertHeldIfAny(wallet, token, hints = {}) {
+  const client = publicClient();
+  const me = getAddress(wallet);
+  const t = lower(token);
+  if (!t || KNOWN_QUOTES[t]) return false;
+
+  let bal = 0n;
+  try {
+    bal = await client.readContract({
+      address: getAddress(t),
+      abi: Erc20Abi,
+      functionName: "balanceOf",
+      args: [me],
+    });
+  } catch {
+    return false;
+  }
+  if (bal <= 0n) return false;
+
+  const meta = await fetchMeta(t, hints.curve || null);
+  if (!meta.curve) return false;
+
+  const prev = db()
+    .prepare(
+      `SELECT buy_tx, entry_epoch, quote_in, cost_usd FROM positions WHERE token=?`,
+    )
+    .get(t);
+
+  let buy = {
+    quoteIn: 0n,
+    tokens: 0n,
+    buyTx: null,
+    entryBlock: null,
+    n: 0,
+  };
+  if (!prev?.buy_tx) {
+    const tip = hints.buyTo ?? (await client.getBlockNumber());
+    const buyFrom =
+      hints.buyFrom ?? (tip > 50_000n ? tip - 50_000n : 0n);
+    buy = await buysOnCurve(meta.curve, me, buyFrom, tip).catch(() => buy);
+  }
+
+  const dist = hints.distributor || meta.creatorFeeRecipient || null;
+  const ethPx = hints.ethPx ?? (await ethUsdMark().catch(() => null));
+
+  upsertPool({
+    token: t,
+    curve: meta.curve || hints.curve,
+    distributor: dist,
+    pair: meta.pair ?? hints.pair,
+    symbol: meta.symbol,
+    decimals: meta.decimals,
+    buyback: meta.buyback,
+    tax_bps: meta.tax_bps,
+    launch_block: hints.launch_block ?? null,
+    launch_tx: hints.launch_tx ?? null,
+  });
+
+  const quoteIn = buy.quoteIn > 0n ? buy.quoteIn : 0n;
+  const cost_usd = costUsdFor(meta.pair ?? hints.pair, quoteIn, ethPx);
+
+  upsertPosition({
+    token: t,
+    entry_block: buy.entryBlock ?? hints.launch_block ?? null,
+    entry_epoch: prev?.entry_epoch ?? 0,
+    tokens: bal,
+    quote_in: quoteIn > 0n ? quoteIn : (prev?.quote_in ?? 0n),
+    cost_usd: cost_usd ?? prev?.cost_usd ?? null,
+    buy_tx: buy.buyTx ?? prev?.buy_tx ?? null,
+    status: "open",
+  });
+
+  if (!prev || (buy.buyTx && prev.buy_tx !== buy.buyTx)) {
+    insertAction({
+      kind: "observe",
+      token: t,
+      detail:
+        (buy.buyTx ? `buy_tx=${buy.buyTx} ` : "balance ") +
+        `quote=${quoteIn} bal=${bal}`,
+    });
+    log(
+      `[observe] position ${meta.symbol || t.slice(0, 10)} bal=${bal} quote=${quoteIn}`,
+    );
+  }
+  return true;
+}
+
+/**
+ * Live observe: WSS factory + fast incremental ticks immediately; boot lookback
+ * runs in the background so pot/claims stay real-time.
  */
 export async function startObserve(wallet) {
   const client = publicClient();
-  const head = await client.getBlockNumber();
-  const lookback = BigInt(Math.max(0, config.readLookbackBlocks));
-  const from = head > lookback ? head - lookback : 0n;
-  log(
-    `[observe] sync wallet=${wallet} blocks ${from}→${head} lookback=${config.readLookbackBlocks}`,
-  );
-  try {
-    const n = await scanObserveRange(wallet, from, head);
-    log(`[observe] synced ${n} position(s)`);
-  } catch (e) {
-    log(`[observe] sync err ${e.message}`);
-  }
-  setCursor(CURSOR, String(head));
+  let cursor = await client.getBlockNumber();
+  setCursor(CURSOR, String(cursor));
 
   const recheck = BigInt(Math.max(1_000, config.observeRecheckBlocks));
+  const wideEvery = Math.max(1, config.observeWideEvery);
+  const tickMs = Math.max(1_000, config.observeTickMs);
+  let tickN = 0;
   let ticking = false;
-  const timer = setInterval(async () => {
-    if (ticking) return;
+  let unwatch = null;
+  let stopped = false;
+
+  async function tick() {
+    if (ticking || stopped) return;
     ticking = true;
     try {
       const tip = await client.getBlockNumber();
-      const fromTick = tip > recheck ? tip - recheck : 0n;
-      const n = await scanObserveRange(wallet, fromTick, tip);
+      tickN += 1;
+      const wide = tickN % wideEvery === 0;
+      let fromTick;
+      if (wide) {
+        fromTick = tip > recheck ? tip - recheck : 0n;
+        log(`[observe] wide recheck ${fromTick}→${tip}`);
+      } else if (cursor < tip) {
+        fromTick = cursor + 1n;
+      } else {
+        fromTick = tip; // DB pools + 1-block launch window
+      }
+      const n = await scanObserveRange(wallet, fromTick, tip, {
+        explorer: wide,
+      });
+      cursor = tip;
       setCursor(CURSOR, String(tip));
-      if (n > 0) log(`[observe] tick positions=${n} @${tip}`);
+      if (n > 0) {
+        log(
+          `[observe] tick positions=${n} @${tip}${wide ? " (wide)" : ""}`,
+        );
+      }
     } catch (e) {
       log("[observe] tick err", e.message);
     } finally {
       ticking = false;
     }
-  }, 12_000);
+  }
+
+  function startFactoryWss() {
+    try {
+      const wss = wssClient();
+      log("[observe/wss] subscribing TokenLaunched + DistributorCreated");
+      unwatch = wss.watchEvent({
+        address: [getAddress(LAUNCH), getAddress(DIST_FACTORY)],
+        onLogs: (logs) => {
+          for (const lg of logs) {
+            try {
+              if (lg.topics?.[0] === TOPICS.TokenLaunched) {
+                const { args } = decodeEventLog({
+                  abi: FactoryAbi,
+                  data: lg.data,
+                  topics: lg.topics,
+                });
+                void upsertHeldIfAny(wallet, args.token, {
+                  curve: lower(args.curve),
+                  pair: lower(args.pairToken),
+                  launch_block:
+                    lg.blockNumber != null ? Number(lg.blockNumber) : null,
+                  launch_tx: lg.transactionHash,
+                });
+              } else if (lg.topics?.[0] === TOPICS.DistributorCreated) {
+                const { args } = decodeEventLog({
+                  abi: DistributorFactoryAbi,
+                  data: lg.data,
+                  topics: lg.topics,
+                });
+                void upsertHeldIfAny(wallet, args.token, {
+                  distributor: lower(args.distributor),
+                });
+              }
+            } catch {
+              /* */
+            }
+          }
+        },
+        onError: (err) => {
+          log("[observe/wss] err", err?.message || err);
+          try {
+            unwatch?.();
+          } catch {
+            /* */
+          }
+          unwatch = null;
+          if (!stopped) setTimeout(startFactoryWss, 2_000);
+        },
+      });
+    } catch (e) {
+      log("[observe/wss] start fail", e.message);
+      if (!stopped) setTimeout(startFactoryWss, 5_000);
+    }
+  }
+
+  startFactoryWss();
+  const timer = setInterval(() => void tick(), tickMs);
+  void tick();
+
+  // Boot lookback in background — short catch-up if DB already has bags.
+  void (async () => {
+    try {
+      const head = await client.getBlockNumber();
+      const existing = Number(
+        db().prepare(`SELECT COUNT(*) AS c FROM positions`).get()?.c ?? 0,
+      );
+      const full = BigInt(Math.max(0, config.readLookbackBlocks));
+      // Seeded → still scan far enough for recent snipes (~3h); not full 1M.
+      const seededCap = BigInt(Math.max(50_000, config.observeRecheckBlocks));
+      const lookback =
+        existing > 0 ? (full > seededCap ? seededCap : full) : full;
+      const from = head > lookback ? head - lookback : 0n;
+      log(
+        `[observe] sync wallet=${wallet} blocks ${from}→${head} lookback=${lookback}` +
+          (existing > 0 ? ` (seeded n=${existing})` : ""),
+      );
+      const n = await scanObserveRange(wallet, from, head, {
+        explorer: true,
+      });
+      log(`[observe] synced ${n} position(s)`);
+      if (head > cursor) cursor = head;
+      setCursor(CURSOR, String(head));
+    } catch (e) {
+      log(`[observe] sync err ${e.message}`);
+    }
+  })();
+
+  log(`[observe] live tick=${tickMs}ms wallet=${wallet}`);
 
   return {
     stop() {
+      stopped = true;
       clearInterval(timer);
+      try {
+        unwatch?.();
+      } catch {
+        /* */
+      }
     },
   };
 }

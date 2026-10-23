@@ -1,6 +1,6 @@
 import { getAddress } from "viem";
 import { CurveAbi, Erc20Abi } from "../chain/abis.mjs";
-import { KNOWN_QUOTES, ZERO } from "../chain/addresses.mjs";
+import { KNOWN_QUOTES, ZERO, lower } from "../chain/addresses.mjs";
 import { ethUsdMark } from "../chain/price.mjs";
 import { sellOutFor } from "../chain/curveMath.mjs";
 import { publicClient } from "../chain/clients.mjs";
@@ -88,7 +88,12 @@ export async function snapshotNetWorth(walletAddress) {
         );
       }
       const usd = await quoteToUsd(pos.pair || ZERO, markQuote);
-      if (usd == null && markQuote > 0n) bagsMarked = false;
+      // Unknown / ineligible pairs (e.g. cbBTC) have no USD mark — skip them in
+      // the total instead of blanking the whole portfolio.
+      const pairKey = lower(pos.pair) || ZERO;
+      if (usd == null && markQuote > 0n && KNOWN_QUOTES[pairKey]) {
+        bagsMarked = false;
+      }
       bags[pos.token] = {
         symbol: pos.symbol,
         bal: String(bal),

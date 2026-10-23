@@ -2,9 +2,11 @@ import { decodeEventLog, getAddress } from "viem";
 import {
   CurveAbi,
   DistributorAbi,
+  Erc20Abi,
   TOPICS,
 } from "../chain/abis.mjs";
 import { lower } from "../chain/addresses.mjs";
+import { sellOutFor } from "../chain/curveMath.mjs";
 import { publicClient, wssClient } from "../chain/clients.mjs";
 import { config, log } from "../config.mjs";
 import {
@@ -15,7 +17,7 @@ import {
   upsertEpoch,
   upsertPoolStats,
 } from "../db/db.mjs";
-import { countHolders } from "./holders.mjs";
+import { holderStats } from "./holders.mjs";
 import { snapshotNetWorth } from "./networth.mjs";
 import { startObserve } from "./observe.mjs";
 import { quoteToUsd } from "./price.mjs";
@@ -32,7 +34,12 @@ function heldRows() {
     .all();
 }
 
-async function refreshPool(row) {
+/**
+ * @param {object} row
+ * @param {{ holders?: boolean }} [opts] — holders=false skips Transfer walk (fast path)
+ */
+async function refreshPool(row, opts = {}) {
+  const withHolders = opts.holders === true;
   const client = publicClient();
   const dist = getAddress(row.distributor);
   let unalloc = 0n;
@@ -64,49 +71,89 @@ async function refreshPool(row) {
     /* */
   }
 
-  let holderCount = null;
-  try {
-    holderCount = await countHolders(
-      row.token,
-      row.launch_block,
-      row.curve,
-    );
-  } catch (e) {
-    log("[watcher] holders fail", e.message);
+  let holderCount = undefined;
+  let sharePct = undefined;
+  let shareAfterCutoffPct = undefined;
+  if (withHolders) {
+    try {
+      const stats = await holderStats(
+        row.token,
+        row.launch_block,
+        row.curve,
+        row._wallet || null,
+      );
+      holderCount = stats.holders;
+      if (stats.sharePct != null) sharePct = stats.sharePct;
+      if (stats.shareAfterCutoffPct != null) {
+        shareAfterCutoffPct = stats.shareAfterCutoffPct;
+      }
+    } catch (e) {
+      log("[watcher] holders fail", e.message);
+    }
   }
 
   const potUsd = await quoteToUsd(row.pair, unalloc);
+
+  // Fast bag mark (same math as networth) so Positions bag column moves with pot.
+  let bag_mark_quote;
+  let bag_mark_usd;
+  if (row.curve && !graduated) {
+    try {
+      const me = row._wallet ? getAddress(row._wallet) : null;
+      let bal = 0n;
+      if (me) {
+        bal = await client.readContract({
+          address: getAddress(row.token),
+          abi: Erc20Abi,
+          functionName: "balanceOf",
+          args: [me],
+        });
+      } else if (row.tokens != null) {
+        bal = BigInt(row.tokens);
+      }
+      if (bal > 0n) {
+        const [Q, T] = await client.readContract({
+          address: getAddress(row.curve),
+          abi: CurveAbi,
+          functionName: "getReserves",
+        });
+        const feeBps = await client.readContract({
+          address: getAddress(row.curve),
+          abi: CurveAbi,
+          functionName: "feeBps",
+        });
+        const taxBps = await client.readContract({
+          address: getAddress(row.curve),
+          abi: CurveAbi,
+          functionName: "creatorTaxBps",
+        });
+        bag_mark_quote = sellOutFor(
+          { Q, T, feeBps: Number(feeBps), taxBps: Number(taxBps) },
+          bal,
+        );
+        bag_mark_usd = await quoteToUsd(row.pair, bag_mark_quote);
+      }
+    } catch {
+      /* */
+    }
+  }
 
   upsertPoolStats({
     token: row.token,
     unallocated_quote: unalloc,
     epoch_count: epochCount,
-    holder_count: holderCount,
+    ...(holderCount !== undefined ? { holder_count: holderCount } : {}),
     pot_usd: potUsd,
     phase: graduated ? "graduated" : "curve",
+    ...(bag_mark_quote != null
+      ? { bag_mark_quote, bag_mark_usd: bag_mark_usd ?? null }
+      : {}),
+    ...(sharePct !== undefined ? { share_pct: sharePct } : {}),
+    ...(shareAfterCutoffPct !== undefined
+      ? { share_after_cutoff_pct: shareAfterCutoffPct }
+      : {}),
   });
   setCursor("heartbeat", String(Date.now()));
-}
-
-async function pollHeldEvents(wallet) {
-  const client = publicClient();
-  const rows = heldRows();
-  const me = lower(wallet);
-  for (const row of rows) {
-    if (!row.distributor) continue;
-    try {
-      const logs = await client.getLogs({
-        address: getAddress(row.distributor),
-        fromBlock: "latest",
-        toBlock: "latest",
-      });
-      for (const lg of logs) {
-        await handleDistLog(lg, row, me);
-      }
-    } catch {
-      /* latest-only can be empty */
-    }
-  }
 }
 
 async function handleDistLog(lg, row, me) {
@@ -131,6 +178,7 @@ async function handleDistLog(lg, row, me) {
         token: row.token,
         detail: `epoch=${args.epochId}`,
       });
+      await refreshPool(row, { holders: false }).catch(() => {});
     } else if (topic === TOPICS.Claimed) {
       const { args } = decodeEventLog({
         abi: DistributorAbi,
@@ -152,6 +200,7 @@ async function handleDistLog(lg, row, me) {
         token: row.token,
         detail: `epoch=${args.epochId} quote=${args.quoteAmount}`,
       });
+      await refreshPool(row, { holders: false }).catch(() => {});
     }
   } catch (e) {
     log("[watcher] log handle", e.message);
@@ -170,11 +219,21 @@ export async function startWatcher(wallets, opts = {}) {
   const wallet = wallets.sniper.address;
   const doObserve = opts.observe === true || wallets.sniper.readOnly === true;
   let observe = null;
-  if (doObserve) {
-    observe = await startObserve(wallet);
-  }
   let unwatch = null;
   let distSet = new Set();
+  let eventCursor = null;
+  let potBusy = false;
+  let holdersBusy = false;
+  let pollBusy = false;
+
+  const observeReady =
+    doObserve
+      ? startObserve(wallet)
+          .then((o) => {
+            observe = o;
+          })
+          .catch((e) => log("[observe] start err", e.message))
+      : Promise.resolve();
 
   async function resubscribe() {
     const rows = heldRows();
@@ -200,26 +259,62 @@ export async function startWatcher(wallets, opts = {}) {
         onLogs: (logs) => {
           for (const lg of logs) {
             const row = byDist.get(lower(lg.address));
-            if (row) handleDistLog(lg, row, lower(wallet));
+            if (row) void handleDistLog(lg, row, lower(wallet));
           }
         },
         onError: (err) => {
           log("[watcher] wss err", err?.message);
+          try {
+            unwatch?.();
+          } catch {
+            /* */
+          }
+          unwatch = null;
+          distSet = new Set();
+          setTimeout(() => resubscribe().catch(() => {}), 1_500);
         },
       });
       log("[watcher] watching", addrs.length, "distributors");
     } catch (e) {
       log("[watcher] subscribe fail", e.message);
+      unwatch = null;
+      distSet = new Set();
     }
   }
 
+  /** Fast path: pot USD + epoch count only (no holder Transfer walk). */
   async function tickPot() {
-    for (const row of heldRows()) {
-      await refreshPool(row).catch((e) =>
-        log("[watcher] refresh", e.message),
+    if (potBusy) return;
+    potBusy = true;
+    try {
+      const rows = heldRows().map((r) => ({ ...r, _wallet: wallet }));
+      await Promise.all(
+        rows.map((row) =>
+          refreshPool(row, { holders: false }).catch((e) =>
+            log("[watcher] refresh", e.message),
+          ),
+        ),
       );
+      await resubscribe();
+    } finally {
+      potBusy = false;
     }
-    await resubscribe();
+  }
+
+  /** Holder count + payout share (Transfer walk). Sequential to spare RPC. */
+  async function tickHolders() {
+    if (holdersBusy) return;
+    holdersBusy = true;
+    try {
+      for (const row of heldRows()) {
+        await refreshPool(
+          { ...row, _wallet: wallet },
+          { holders: true },
+        ).catch((e) => log("[watcher] holders", e.message));
+      }
+    } finally {
+      holdersBusy = false;
+    }
   }
 
   async function tickNet() {
@@ -230,24 +325,79 @@ export async function startWatcher(wallets, opts = {}) {
     );
   }
 
+  /** Block-range poll so we do not miss events between WSS drops. */
+  async function pollHeldEvents() {
+    if (pollBusy) return;
+    pollBusy = true;
+    try {
+      const client = publicClient();
+      const tip = await client.getBlockNumber();
+      if (eventCursor == null) {
+        eventCursor = tip > 8n ? tip - 8n : 0n;
+      }
+      if (eventCursor >= tip) return;
+      const from = eventCursor + 1n;
+      const to = tip - from > 300n ? from + 300n : tip;
+      const rows = heldRows();
+      const byDist = new Map(
+        rows.filter((r) => r.distributor).map((r) => [lower(r.distributor), r]),
+      );
+      const addrs = [...byDist.keys()].map((a) => getAddress(a));
+      if (addrs.length) {
+        const logs = await client.getLogs({
+          address: addrs,
+          fromBlock: from,
+          toBlock: to,
+        });
+        const me = lower(wallet);
+        for (const lg of logs) {
+          const row = byDist.get(lower(lg.address));
+          if (row) await handleDistLog(lg, row, me);
+        }
+      }
+      eventCursor = to;
+    } catch {
+      /* */
+    } finally {
+      pollBusy = false;
+    }
+  }
+
   await tickPot();
   await tickNet();
 
   const potTimer = setInterval(tickPot, config.potRefreshMs);
+  // Prefer HOLDER_REFRESH_MS; else SHARE_REFRESH_MS (default 2m) so Positions
+  // share fills without requiring the old holders toggle.
+  const holdersEveryMs =
+    config.holderRefreshMs > 0
+      ? config.holderRefreshMs
+      : config.shareRefreshMs > 0
+        ? config.shareRefreshMs
+        : 0;
+  const holderTimer =
+    holdersEveryMs > 0 ? setInterval(tickHolders, holdersEveryMs) : null;
+  if (holderTimer) void tickHolders();
   const netTimer = setInterval(tickNet, config.networthIntervalMs);
   const pollTimer = setInterval(
-    () => pollHeldEvents(wallet).catch(() => {}),
-    8_000,
+    () => pollHeldEvents().catch(() => {}),
+    config.eventPollMs,
   );
 
   log(
     `[watcher] started wallet=${wallet}` +
-      (doObserve ? " mode=READ" : ""),
+      (doObserve ? " mode=READ" : "") +
+      ` pot=${config.potRefreshMs}ms events=${config.eventPollMs}ms` +
+      (holderTimer
+        ? ` holders+share=${holdersEveryMs}ms`
+        : " holders+share=off"),
   );
+  void observeReady;
 
   return {
     stop() {
       clearInterval(potTimer);
+      if (holderTimer) clearInterval(holderTimer);
       clearInterval(netTimer);
       clearInterval(pollTimer);
       observe?.stop();

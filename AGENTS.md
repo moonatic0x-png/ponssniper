@@ -34,7 +34,7 @@ Separate process (`npm run follow`). Does **not** change launch hotpath latency.
    Plus any addresses in `FOLLOW_FARMERS`. (Dynamic “≥20 majority pots last week” needs a full claims index — not in this repo; extend via env.)
 2. Token must be a Pons launched curve token; USDG/WETH/other ERC20 → skip (`skip_quote_token` / `not_pons_token`). Normal noise.
 3. Farmer still holds ≥ dust; we have no `positions` row for that token.
-4. Hard gates: not graduated, `buybackEnabled === false`, `creatorFeeRecipient === distributor`, quote eligible.
+4. No pool gates — farmer Transfer on a Pons token ⇒ buy. Skip only already-held, dust, non-Pons, and spend caps.
    Soft: log pot unallocated (`has_unalloc` / `thin_or_unknown`). **No** `$2` net-floor, trigger cost, wash, or self-harvest.
 5. Size ≈ `FOLLOW_BUY_USD` (default **0.8**) quote notional → coverQuote → `curve.buy` (DRY unless `FOLLOW_LIVE=1`).
 6. SQLite: `positions.strategy='follow'`; actions `follow_detect` / `follow_skip` / `follow_buy_dry` / `follow_buy_sent`.
@@ -166,7 +166,7 @@ npm run dash
 - `actions.kind` = `follow_buy_sent` then position `status=open` `strategy=follow`
 - Dashboard Strategy = `follow`; watcher tracks publish / Claimed like snipes
 
-If `buy_fail` / `follow_buy_fail` / `simulate_fail` / `insufficient_quote` / `insufficient_eth`: fix funding or caps; do not disable gates.
+If `buy_fail` / `follow_buy_fail` / `simulate_fail` / `insufficient_quote` / `insufficient_eth`: fix funding or caps.
 
 ## Phase F — After entry (hold)
 

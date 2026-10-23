@@ -21,6 +21,17 @@ function migratePositions(_db) {
   }
 }
 
+function migratePoolStats(_db) {
+  const cols = _db.prepare(`PRAGMA table_info(pool_stats)`).all();
+  if (!cols.length) return;
+  if (!cols.some((c) => c.name === "share_pct")) {
+    _db.exec(`ALTER TABLE pool_stats ADD COLUMN share_pct REAL`);
+  }
+  if (!cols.some((c) => c.name === "share_after_cutoff_pct")) {
+    _db.exec(`ALTER TABLE pool_stats ADD COLUMN share_after_cutoff_pct REAL`);
+  }
+}
+
 export function openDb(path = config.dbPath) {
   if (_db) return _db;
   mkdirSync(dirname(path), { recursive: true });
@@ -29,6 +40,7 @@ export function openDb(path = config.dbPath) {
   _db.exec("PRAGMA synchronous = NORMAL;");
   _db.exec(SCHEMA);
   migratePositions(_db);
+  migratePoolStats(_db);
   return _db;
 }
 
@@ -147,8 +159,8 @@ export function insertClaim(row) {
 export function upsertPoolStats(row) {
   db()
     .prepare(
-      `INSERT INTO pool_stats(token, unallocated_quote, epoch_count, holder_count, pot_usd, phase, bag_mark_quote, bag_mark_usd, refreshed_at)
-       VALUES(?,?,?,?,?,?,?,?,?)
+      `INSERT INTO pool_stats(token, unallocated_quote, epoch_count, holder_count, pot_usd, phase, bag_mark_quote, bag_mark_usd, share_pct, share_after_cutoff_pct, refreshed_at)
+       VALUES(?,?,?,?,?,?,?,?,?,?,?)
        ON CONFLICT(token) DO UPDATE SET
          unallocated_quote=COALESCE(excluded.unallocated_quote, pool_stats.unallocated_quote),
          epoch_count=COALESCE(excluded.epoch_count, pool_stats.epoch_count),
@@ -157,6 +169,8 @@ export function upsertPoolStats(row) {
          phase=COALESCE(excluded.phase, pool_stats.phase),
          bag_mark_quote=COALESCE(excluded.bag_mark_quote, pool_stats.bag_mark_quote),
          bag_mark_usd=COALESCE(excluded.bag_mark_usd, pool_stats.bag_mark_usd),
+         share_pct=COALESCE(excluded.share_pct, pool_stats.share_pct),
+         share_after_cutoff_pct=COALESCE(excluded.share_after_cutoff_pct, pool_stats.share_after_cutoff_pct),
          refreshed_at=excluded.refreshed_at`,
     )
     .run(
@@ -168,6 +182,8 @@ export function upsertPoolStats(row) {
       row.phase ?? null,
       row.bag_mark_quote != null ? String(row.bag_mark_quote) : null,
       row.bag_mark_usd ?? null,
+      row.share_pct ?? null,
+      row.share_after_cutoff_pct ?? null,
       row.refreshed_at ?? now(),
     );
 }
@@ -263,7 +279,8 @@ export function getState() {
       `SELECT p.*, pl.symbol, pl.curve, pl.distributor, pl.pair, pl.decimals,
               pl.launch_tx, pl.launch_block, pl.buyback, pl.tax_bps,
               s.epoch_count AS current_epoch, s.unallocated_quote, s.holder_count,
-              s.pot_usd, s.phase, s.bag_mark_quote, s.bag_mark_usd, s.refreshed_at
+              s.pot_usd, s.phase, s.bag_mark_quote, s.bag_mark_usd,
+              s.share_pct, s.share_after_cutoff_pct, s.refreshed_at
        FROM positions p
        JOIN pools pl ON pl.token = p.token
        LEFT JOIN pool_stats s ON s.token = p.token

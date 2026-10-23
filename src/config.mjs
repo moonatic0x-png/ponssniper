@@ -154,11 +154,16 @@ export const config = {
   /** How far back to scan launches/buys on observe start (~0.1s blocks). */
   readLookbackBlocks: num("READ_LOOKBACK_BLOCKS", 1_000_000),
   /**
-   * Rolling window of TokenLaunched to re-check each observe tick.
+   * Rolling window of TokenLaunched for periodic observe “wide” re-checks.
    * Must be wide enough to cover “buy shortly after launch”; default ~3h.
-   * (Cursor-only ~50-block ticks miss buys on pools launched earlier.)
+   * Normal ticks only advance the cursor (fast); wide runs every
+   * OBSERVE_WIDE_EVERY ticks so free RPCs are not saturated.
    */
   observeRecheckBlocks: num("OBSERVE_RECHECK_BLOCKS", 100_000),
+  /** How often (in observe ticks) to run the wide launch re-scan. Default ~5m. */
+  observeWideEvery: num("OBSERVE_WIDE_EVERY", 100),
+  /** Incremental observe tick (ms). Default 3s for near-real-time READ. */
+  observeTickMs: num("OBSERVE_TICK_MS", 3_000),
   /**
    * Optional Blockscout REST base for observe token discovery (held ERC-20s).
    * Finds follow bags whose launches fall outside READ_LOOKBACK_BLOCKS.
@@ -198,8 +203,21 @@ export const config = {
    */
   gasReserveWei: big("GAS_RESERVE_WEI") ?? 100_000_000_000_000n, // 0.0001 ETH
   holderDust: BigInt(process.env.HOLDER_DUST || "1"),
-  networthIntervalMs: num("NETWORTH_INTERVAL_MS", 30_000),
-  potRefreshMs: num("POT_REFRESH_MS", 15_000),
+  networthIntervalMs: num("NETWORTH_INTERVAL_MS", 20_000),
+  /** Fast pot/epoch refresh (no holder walk). Default 3s. */
+  potRefreshMs: num("POT_REFRESH_MS", 3_000),
+  /**
+   * Slow holder recount (ms). 0 = fall through to SHARE_REFRESH_MS.
+   * Transfer walks are heavy — keep this off (0) and use share cadence.
+   */
+  holderRefreshMs: num("HOLDER_REFRESH_MS", 0),
+  /**
+   * Holder count + payout share refresh (ms) when HOLDER_REFRESH_MS is 0.
+   * Default 120s. Set 0 to disable Transfer walks entirely.
+   */
+  shareRefreshMs: num("SHARE_REFRESH_MS", 120_000),
+  /** HTTP fallback poll for EpochPublished/Claimed (ms). Default 2s. */
+  eventPollMs: num("EVENT_POLL_MS", 2_000),
   dbPath: resolve(ROOT, process.env.DB_PATH || "data/pons.db"),
   walletsPath: resolve(ROOT, "secrets/wallets.json"),
   dashHost: process.env.DASH_HOST || "127.0.0.1",

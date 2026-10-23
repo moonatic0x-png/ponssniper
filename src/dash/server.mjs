@@ -61,6 +61,7 @@ export function startDash({
       const body = readFileSync(file);
       res.writeHead(200, {
         "content-type": MIME[extname(file)] || "application/octet-stream",
+        "cache-control": "no-store",
       });
       res.end(body);
     } catch (e) {

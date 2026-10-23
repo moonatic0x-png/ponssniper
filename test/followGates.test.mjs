@@ -4,20 +4,10 @@ import { evaluateFollowGates } from "../src/follow/gates.mjs";
 import { planBuyFromQuote } from "../src/follow/plan.mjs";
 import { buyTokensFor } from "../src/chain/curveMath.mjs";
 
-const dist = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-const other = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 const usdg = "0x5fc5360d0400a0fd4f2af552add042d716f1d168";
 
 const baseOk = {
-  buybackEnabled: false,
-  creatorFeeRecipient: dist,
-  distributor: dist,
-  pairToken: usdg,
-  pairSymbol: "USDG",
-  skipIneligibleQuotes: true,
-  graduated: false,
   alreadyHeld: false,
-  farmerHolds: true,
   openFollows: 0,
   maxOpen: 40,
   dailyUsdSpent: 0,
@@ -26,7 +16,7 @@ const baseOk = {
 };
 
 describe("evaluateFollowGates", () => {
-  it("farmer bag + sharing on → would-buy (ok)", () => {
+  it("farmer Transfer → buy (no pool gates)", () => {
     const g = evaluateFollowGates(baseOk);
     assert.equal(g.ok, true);
   });
@@ -37,31 +27,18 @@ describe("evaluateFollowGates", () => {
     assert.equal(g.reason, "already_held");
   });
 
-  it("sharing off (recipient ≠ distributor) → skip", () => {
+  it("buyback / sharing / quote / graduated ignored", () => {
     const g = evaluateFollowGates({
       ...baseOk,
-      creatorFeeRecipient: other,
+      buybackEnabled: true,
+      creatorFeeRecipient: "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      distributor: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      pairSymbol: "WETH",
+      skipIneligibleQuotes: true,
+      graduated: true,
+      farmerHolds: false,
     });
-    assert.equal(g.ok, false);
-    assert.equal(g.reason, "recipient_not_distributor");
-  });
-
-  it("no farmer bag → skip", () => {
-    const g = evaluateFollowGates({ ...baseOk, farmerHolds: false });
-    assert.equal(g.ok, false);
-    assert.equal(g.reason, "farmer_no_bag");
-  });
-
-  it("buyback on → skip", () => {
-    const g = evaluateFollowGates({ ...baseOk, buybackEnabled: true });
-    assert.equal(g.ok, false);
-    assert.equal(g.reason, "buyback_enabled");
-  });
-
-  it("graduated → skip", () => {
-    const g = evaluateFollowGates({ ...baseOk, graduated: true });
-    assert.equal(g.ok, false);
-    assert.equal(g.reason, "graduated");
+    assert.equal(g.ok, true);
   });
 
   it("max open follows → skip", () => {
@@ -83,16 +60,6 @@ describe("evaluateFollowGates", () => {
     });
     assert.equal(g.ok, false);
     assert.equal(g.reason, "daily_usd_cap");
-  });
-
-  it("ineligible WETH quote → skip when toggle on", () => {
-    const g = evaluateFollowGates({
-      ...baseOk,
-      pairSymbol: "WETH",
-      skipIneligibleQuotes: true,
-    });
-    assert.equal(g.ok, false);
-    assert.match(g.reason, /ineligible_quote/);
   });
 });
 

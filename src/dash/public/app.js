@@ -42,6 +42,24 @@ function bagLabel(p) {
   return "—";
 }
 
+function shareLabel(p) {
+  const after = p.share_after_cutoff_pct;
+  const raw = p.share_pct;
+  if (after == null && raw == null) return { text: "—", title: "" };
+  const fmt = (n) =>
+    Number(n).toLocaleString(undefined, {
+      maximumFractionDigits: Number(n) < 1 ? 3 : 2,
+    }) + "%";
+  const text = after != null ? fmt(after) : fmt(raw);
+  const title =
+    raw != null && after != null
+      ? `raw ${fmt(raw)} → after 1.5% cutoff ${fmt(after)}`
+      : raw != null
+        ? `raw ${fmt(raw)}`
+        : `after cutoff ${fmt(after)}`;
+  return { text, title };
+}
+
 function linkCell(p) {
   const bits = [];
   if (p.pons_url) {
@@ -112,7 +130,9 @@ async function refresh() {
   const snap = s.snapshot;
   $("totalUsd").textContent = snap ? fmtUsd(snap.total_usd) : "—";
   $("claimsUsd").textContent = fmtUsd(s.claims_total_usd);
-  $("snapAt").textContent = snap ? ago(snap.created_at) + " ago" : "—";
+  // Prefer pot heartbeat (near-real-time) over slower networth snapshot age.
+  const liveAt = Number(s.heartbeat) || snap?.created_at;
+  $("snapAt").textContent = liveAt ? ago(liveAt) + " ago" : "—";
 
   $("actions").innerHTML = (s.actions || [])
     .map(
@@ -134,12 +154,14 @@ async function refresh() {
           ? `${p.entry_epoch ?? "—"}→${p.current_epoch ?? "—"}`
           : "—";
       const name = p.symbol || short(p.token);
+      const share = shareLabel(p);
       return `<tr ${rowOpen(p.pons_url)}>
           <td title="${esc(p.token)}"><span class="tok">${esc(name)}</span></td>
           <td>${esc(p.pair_symbol || short(p.pair) || "ETH")}</td>
           <td>${esc(p.strategy || "snipe")}</td>
           <td class="mono">${bagLabel(p)}</td>
           <td class="mono">${fmtUsd(p.pot_usd)}</td>
+          <td class="mono" title="${esc(share.title)}">${esc(share.text)}</td>
           <td class="mono">${p.holder_count ?? "—"}</td>
           <td class="mono">${epoch}</td>
           <td class="${p.published ? "yes" : "no"}">${p.published ? "yes" : "no"}</td>
@@ -172,4 +194,4 @@ async function refresh() {
 }
 
 refresh();
-setInterval(refresh, 4000);
+setInterval(refresh, 2000);

@@ -20,9 +20,9 @@ Stack: `viem` + built-in `node:sqlite`. Defaults are **DRY** (`SNIPER_LIVE=0`, `
 1. `buybackEnabled === false`
 2. `creatorFeeRecipient` === the pool’s HolderDistributor (“sharing on”)
 
-**Farmer-follow** keeps those gates, plus: curve not graduated, farmer holds a non-dust bag, we have no position yet, `FOLLOW_MAX_OPEN` / `FOLLOW_DAILY_USD`. No `$2` net-floor / trigger / wash cost (farmer harvests).
+**Farmer-follow** has no pool gates: farmer Transfer on a Pons token ⇒ buy. Only skips already-held, dust Transfers, non-Pons tokens, and spend caps (`FOLLOW_MAX_OPEN` / `FOLLOW_DAILY_USD`). No `$2` net-floor / trigger / wash.
 
-Optional: skip cbBTC / WETH quote pairs (`SKIP_INELIGIBLE_QUOTES=1`, default).
+Launch sniper still uses the buyback / sharing gates above. Optional: sniper skips cbBTC / WETH (`SKIP_INELIGIBLE_QUOTES=1`, default).
 
 ## Buy path
 

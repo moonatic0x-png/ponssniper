@@ -36,9 +36,7 @@ import {
   upsertPool,
   upsertPosition,
 } from "../db/db.mjs";
-import { knownSymbol } from "../sniper/gates.mjs";
 import { createWarmAccount, executeBuy } from "../sniper/buy.mjs";
-import { balanceOf } from "../sniper/coverQuote.mjs";
 import {
   lookbackFarmerTransfers,
   startFarmerTransferListener,
@@ -237,31 +235,11 @@ export async function tryFollow(ev, ctx) {
       return { ok: false, reason: "not_pons_token" };
     }
 
-    // Confirm farmer still holds (lookback) or just received (live Transfer).
-    let farmerBal = 0n;
-    if (ctx.farmerBalance != null) {
-      farmerBal = ctx.farmerBalance;
-    } else {
-      try {
-        farmerBal = await balanceOf(t, ev.to);
-      } catch {
-        farmerBal = ev.value ?? 0n;
-      }
-    }
-    const farmerHolds = farmerBal >= dust || (ev.value != null && ev.value >= dust);
-
+    // Farmer Transfer on a Pons token ⇒ buy. No pool gates.
     const start = new Date();
     start.setUTCHours(0, 0, 0, 0);
     const gate = evaluateFollowGates({
-      buybackEnabled: !!pool.info.buybackEnabled,
-      creatorFeeRecipient: pool.info.creatorFeeRecipient,
-      distributor: pool.distributor,
-      pairToken: pool.pair,
-      pairSymbol: knownSymbol(pool.pair) || pool.symbol,
-      skipIneligibleQuotes: config.skipIneligibleQuotes,
-      graduated: pool.graduated,
       alreadyHeld: bought.has(t) || hasPosition(t),
-      farmerHolds,
       openFollows: countOpenFollows(),
       maxOpen: config.followMaxOpen,
       dailyUsdSpent: sumDailyFollowUsd(start.getTime()),

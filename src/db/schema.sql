@@ -81,6 +81,8 @@ CREATE TABLE IF NOT EXISTS pool_stats (
   phase TEXT,
   bag_mark_quote TEXT,
   bag_mark_usd REAL,
+  share_pct REAL,
+  share_after_cutoff_pct REAL,
   refreshed_at INTEGER
 );
 
