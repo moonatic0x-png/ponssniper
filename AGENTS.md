@@ -70,12 +70,14 @@ Skips with `buyback_enabled` or `recipient_not_distributor` are normal — not b
 
 ## Phase D — Fund for a live entry
 
-Fund the sniper address on Robinhood Chain **before** enabling live:
+Fund the sniper address **primarily in ETH**. Before every buy the sniper auto-covers the pool’s `pairToken`:
 
-| Pair at launch | Need in wallet |
-|----------------|----------------|
-| ETH (`pairToken = 0x0`) | ETH ≥ expected `quoteIn` + gas |
-| USDG / other ERC20 | That quote token ≥ `quoteIn` (+ gas ETH). Hot path does **not** auto-swap unless `ALLOW_QUOTE_SWAP=1` (default off; swap not implemented on hot path) |
+1. Size curve buy → `quoteNeeded` (100k tokens, fees/tax in math).
+2. If `pairToken` is native ETH → `curve.buy` with `value = quoteNeeded` (no swap).
+3. Else if wallet already holds ≥ `quoteNeeded` of the pair → use balance.
+4. Else → swap **only the shortfall** ETH → pair via Uniswap router (`exactInput` / multicall), then approve + `curve.buy`.
+
+Keep enough ETH for: cover swap + `quoteNeeded` (ETH pairs) + `GAS_RESERVE_WEI` (default 0.0001 ETH).
 
 Suggested env caps in `.env` before live:
 
@@ -85,6 +87,7 @@ DAILY_MAX_QUOTE=<raw units/day>
 SLIPPAGE_BPS=300
 SNIPER_TOKENS=100000
 SNIPER_DELAY_MS=0                  # raise (e.g. 2500) to wait out ~99%→decay snipe tax (~3s)
+GAS_RESERVE_WEI=100000000000000    # 0.0001 ETH left for gas after cover
 SNIPER_LIVE=0                      # keep 0 until operator says go
 ```
 

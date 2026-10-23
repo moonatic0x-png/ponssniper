@@ -6,6 +6,8 @@ Stack: `viem` + built-in `node:sqlite`. Default is **DRY** (`SNIPER_LIVE=0`) —
 
 **Agent / operator runbook (clone → DRY → fund → live entry):** see [AGENTS.md](AGENTS.md).
 
+**Changelog:** [CHANGELOG.md](CHANGELOG.md).
+
 **Secrets:** never commit `.env` or `secrets/wallets.json`. Only `.env.example` and `secrets/.gitkeep` ship in git.
 
 ## Gates
@@ -20,6 +22,8 @@ Optional: skip cbBTC / WETH quote pairs (`SKIP_INELIGIBLE_QUOTES=1`, default).
 ## Buy path
 
 Curves use `buy(quoteIn, minTokensOut, to)` (exact-in). We size a fixed token amount (`SNIPER_TOKENS`, default 100000 whole tokens × 10^decimals), compute `quoteIn` from reserves, and guard with `MAX_QUOTE_IN` / `DAILY_MAX_QUOTE` / `SLIPPAGE_BPS`.
+
+**Quote funding:** wallet is ETH-primary. Before each buy, `coverQuote` uses existing pair balance or swaps only the shortfall ETH→`pairToken` through the router (native ETH pairs skip the swap).
 
 **Snipe tax:** on-chain tax starts ~99% (`snipeTaxStartBps`) and decays over ~3s. Default `SNIPER_DELAY_MS=0` for max speed; raise if you want to wait out the tax.
 

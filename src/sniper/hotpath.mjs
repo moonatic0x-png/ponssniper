@@ -228,11 +228,12 @@ export async function startHotpath(wallets) {
       });
       tx_hash_ts = Date.now();
 
+      const coverVia = result.cover?.via ?? "?";
       log(
         `[snipe] ${config.live ? "LIVE" : "DRY"} ${symbol || token.slice(0, 10)} ` +
           `detect→gate=${gate_ts - detect_ts}ms gate→tx=${tx_hash_ts - gate_ts}ms ` +
           `detect→tx=${tx_hash_ts - detect_ts}ms ` +
-          `quoteIn=${plan.quoteIn} tokens=${plan.target} ` +
+          `quoteIn=${plan.quoteIn} tokens=${plan.target} cover=${coverVia} ` +
           (result.ok
             ? result.dry
               ? "would-buy"
@@ -248,7 +249,8 @@ export async function startHotpath(wallets) {
           : "buy_fail",
         token,
         detail: result.ok
-          ? result.tx || `quote=${plan.quoteIn}`
+          ? `${result.tx || `quote=${plan.quoteIn}`} cover=${coverVia}` +
+            (result.cover?.ethIn != null ? ` ethIn=${result.cover.ethIn}` : "")
           : result.reason,
         latency_ms: tx_hash_ts - detect_ts,
       });

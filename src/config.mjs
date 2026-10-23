@@ -63,7 +63,8 @@ export const config = {
   slippageBps: num("SLIPPAGE_BPS", 300),
   sniperDelayMs: num("SNIPER_DELAY_MS", 0),
   skipIneligibleQuotes: bool("SKIP_INELIGIBLE_QUOTES", true),
-  allowQuoteSwap: bool("ALLOW_QUOTE_SWAP", false),
+  /** ETH left on wallet for gas after ETH→quote cover (wei). */
+  gasReserveWei: big("GAS_RESERVE_WEI") ?? 100_000_000_000_000n, // 0.0001 ETH
   holderDust: BigInt(process.env.HOLDER_DUST || "1"),
   networthIntervalMs: num("NETWORTH_INTERVAL_MS", 30_000),
   potRefreshMs: num("POT_REFRESH_MS", 15_000),

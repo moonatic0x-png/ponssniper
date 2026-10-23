@@ -9,6 +9,7 @@ import { ZERO, lower } from "../chain/addresses.mjs";
 import { entryQuoteFor, buyTokensFor, slip } from "../chain/curveMath.mjs";
 import { publicClient, writeClient } from "../chain/clients.mjs";
 import { config, log } from "../config.mjs";
+import { coverQuote } from "./coverQuote.mjs";
 
 /**
  * Pre-warmed account state for hot path.
@@ -36,7 +37,7 @@ export function createWarmAccount(wallets) {
       state.maxFeePerGas = fees.maxFeePerGas;
       state.maxPriorityFeePerGas = fees.maxPriorityFeePerGas;
     } else {
-      state.maxFeePerGas = parseEther("0.000000002"); // 2 gwei fallback
+      state.maxFeePerGas = parseEther("0.000000002");
       state.maxPriorityFeePerGas = parseEther("0.000000001");
     }
     state.warmedAt = Date.now();
@@ -61,7 +62,13 @@ export function planBuy({
   const sim = buyTokensFor(curveState, quoteIn);
   const minTokensOut = slip(target, slippageBps);
   if (sim.tokens < minTokensOut) {
-    return { ok: false, reason: "sim_below_min", quoteIn, target, simTokens: sim.tokens };
+    return {
+      ok: false,
+      reason: "sim_below_min",
+      quoteIn,
+      target,
+      simTokens: sim.tokens,
+    };
   }
   if (config.maxQuoteIn != null && quoteIn > config.maxQuoteIn) {
     return { ok: false, reason: "max_quote_in", quoteIn };
@@ -76,7 +83,8 @@ export function planBuy({
 }
 
 /**
- * Submit or DRY-simulate curve buy. No sell path.
+ * Cover quote (ETH→pair if needed) then submit or DRY-simulate curve buy.
+ * No sell path.
  */
 export async function executeBuy({
   warm,
@@ -89,21 +97,21 @@ export async function executeBuy({
   const me = warm.state.address;
   const curveAddr = getAddress(curve);
   const isEth = plan.isEth;
+  const pair = isEth ? ZERO : getAddress(pairToken);
 
+  // 1) Automatic quote funding — balance or ETH→quote for the shortfall only
+  const covered = await coverQuote(warm, pair, plan.quoteIn, { live });
+  if (!covered.ok) {
+    return { ok: false, reason: covered.reason, cover: covered };
+  }
+  log(
+    `[cover] via=${covered.via}${covered.dry ? " (DRY)" : ""}` +
+      (covered.ethIn != null ? ` ethIn=${covered.ethIn}` : "") +
+      ` quoteNeeded=${plan.quoteIn}`,
+  );
+
+  // 2) Approve curve to pull ERC20 quote
   if (!isEth) {
-    const pair = getAddress(pairToken);
-    const bal = await client.readContract({
-      address: pair,
-      abi: Erc20Abi,
-      functionName: "balanceOf",
-      args: [me],
-    });
-    if (bal < plan.quoteIn) {
-      if (!config.allowQuoteSwap) {
-        return { ok: false, reason: `insufficient_quote bal=${bal} need=${plan.quoteIn}` };
-      }
-      return { ok: false, reason: "quote_swap_not_implemented_on_hot_path" };
-    }
     const allowance = await client.readContract({
       address: pair,
       abi: Erc20Abi,
@@ -115,22 +123,20 @@ export async function executeBuy({
         log("[DRY] would approve", pair, "→", curveAddr);
       } else {
         const wc = writeClient(warm.state.account);
+        if (warm.state.nonce == null) await warm.refresh();
+        const nonce = warm.state.nonce;
         const hash = await wc.writeContract({
           address: pair,
           abi: Erc20Abi,
           functionName: "approve",
           args: [curveAddr, maxUint256],
-          nonce: warm.state.nonce++,
+          nonce,
           maxFeePerGas: warm.state.maxFeePerGas,
           maxPriorityFeePerGas: warm.state.maxPriorityFeePerGas,
         });
+        warm.state.nonce = nonce + 1;
         await client.waitForTransactionReceipt({ hash });
       }
-    }
-  } else {
-    const ethBal = await client.getBalance({ address: me });
-    if (ethBal < plan.quoteIn) {
-      return { ok: false, reason: `insufficient_eth bal=${ethBal} need=${plan.quoteIn}` };
     }
   }
 
@@ -144,7 +150,8 @@ export async function executeBuy({
     await new Promise((r) => setTimeout(r, config.sniperDelayMs));
   }
 
-  // Simulate always
+  // 3) Simulate buy when we have (or will have) quote; in DRY after eth-cover,
+  // eth_call may still fail if wallet lacks quote — log and treat as planned.
   try {
     await client.call({
       account: me,
@@ -153,7 +160,21 @@ export async function executeBuy({
       value: isEth ? plan.quoteIn : 0n,
     });
   } catch (e) {
-    return { ok: false, reason: `simulate_fail: ${e.shortMessage || e.message}` };
+    if (!live && covered.via !== "balance" && covered.via !== "eth_native") {
+      log(
+        `[DRY] buy simulate skipped/failed after planned cover: ${e.shortMessage || e.message}`,
+      );
+    } else if (!live && covered.dry) {
+      log(
+        `[DRY] buy simulate (pre-fund state): ${e.shortMessage || e.message}`,
+      );
+    } else {
+      return {
+        ok: false,
+        reason: `simulate_fail: ${e.shortMessage || e.message}`,
+        cover: covered,
+      };
+    }
   }
 
   if (!live) {
@@ -163,6 +184,7 @@ export async function executeBuy({
       quoteIn: plan.quoteIn,
       tokens: plan.target,
       tx: null,
+      cover: covered,
     };
   }
 
@@ -187,10 +209,14 @@ export async function executeBuy({
       quoteIn: plan.quoteIn,
       tokens: plan.target,
       nonce,
+      cover: covered,
     };
   } catch (e) {
-    // refresh nonce on failure
     await warm.refresh().catch(() => {});
-    return { ok: false, reason: `send_fail: ${e.shortMessage || e.message}` };
+    return {
+      ok: false,
+      reason: `send_fail: ${e.shortMessage || e.message}`,
+      cover: covered,
+    };
   }
 }
